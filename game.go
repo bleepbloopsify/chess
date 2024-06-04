@@ -106,7 +106,7 @@ func FEN(fen string) (func(*Game), error) {
 		return nil, err
 	}
 	return func(g *Game) {
-		pos.inCheck = isInCheck(pos)
+		pos.inCheck = IsInCheck(pos)
 		g.pos = pos
 		g.positions = []*Position{pos}
 		g.updatePosition()
