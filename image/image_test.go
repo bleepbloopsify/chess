@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/notnil/chess"
-	"github.com/notnil/chess/image"
+	"github.com/bleepbloopsify/chess"
+	"github.com/bleepbloopsify/chess/image"
 )
 
 const expectedMD5 = "08aaa6fcfde3bb900fc54bdfef3d5c81"
