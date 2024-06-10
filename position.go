@@ -131,6 +131,13 @@ func (pos *Position) HalfMoveClock() int {
 	return pos.halfMoveClock
 }
 
+// SetHalfMoveClock sets the half-move clock (50-rule).
+func (pos *Position) SetHalfMoveClock(hmc int) (p *Position) {
+	pos.halfMoveClock = hmc
+
+	return pos
+}
+
 // EnPassantSquare returns the en-passant square.
 func (pos *Position) EnPassantSquare() Square {
 	return pos.enPassantSquare
