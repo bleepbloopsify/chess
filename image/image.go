@@ -16,7 +16,7 @@ import (
 // An error is returned if there is there is an error writing data.
 // SVG also takes options which can customize the image output.
 func SVG(w io.Writer, b *chess.Board, opts ...func(*encoder)) error {
-	e := new(w, opts)
+	e := newEncoder(w, opts)
 	return e.EncodeSVG(b)
 }
 
@@ -56,14 +56,14 @@ type encoder struct {
 	w           io.Writer
 	light       color.Color
 	dark        color.Color
-	perspective chess.Color
 	marks       map[chess.Square]color.Color
+	perspective chess.Color
 }
 
-// New returns an encoder that writes to the given writer.
-// New also takes options which can customize the image
+// newEncoder returns an encoder that writes to the given writer.
+// newEncoder also takes options which can customize the image
 // output.
-func new(w io.Writer, options []func(*encoder)) *encoder {
+func newEncoder(w io.Writer, options []func(*encoder)) *encoder {
 	e := &encoder{
 		w:           w,
 		light:       color.RGBA{235, 209, 166, 1},
@@ -95,6 +95,7 @@ var (
 // the Encoder's writer.  An error is returned if there
 // is there is an error writing data.
 func (e *encoder) EncodeSVG(b *chess.Board) error {
+	const lastRank = 7
 	boardMap := b.SquareMap()
 	canvas := svg.New(e.w)
 	canvas.Start(boardWidth, boardHeight)
@@ -129,12 +130,12 @@ func (e *encoder) EncodeSVG(b *chess.Board) error {
 			txtColor := e.colorForText(sq)
 			if j == 0 {
 				style := "font-size:11px;fill: " + colorToHex(txtColor)
-				canvas.Text(x+(sqWidth*1/20), y+(sqHeight*5/20), sq.Rank().String(), style)
+				canvas.Text(x+(sqWidth*1/20), y+(sqHeight*5/20), sq.Rank().String(), style) //nolint:mnd // this is a magic number
 			}
 			// draw file text on rank 1
-			if i == 7 {
+			if i == lastRank {
 				style := "text-anchor:end;font-size:11px;fill: " + colorToHex(txtColor)
-				canvas.Text(x+(sqWidth*19/20), y+sqHeight-(sqHeight*1/15), sq.File().String(), style)
+				canvas.Text(x+(sqWidth*19/20), y+sqHeight-(sqHeight*1/15), sq.File().String(), style) //nolint:mnd // this is a magic number
 			}
 		}
 	}
@@ -160,24 +161,23 @@ func (e *encoder) colorForText(sq chess.Square) color.Color {
 
 func colorToHex(c color.Color) string {
 	r, g, b, _ := c.RGBA()
-	return fmt.Sprintf("#%02x%02x%02x", uint8(float64(r)+0.5), uint8(float64(g)*1.0+0.5), uint8(float64(b)*1.0+0.5))
+	return fmt.Sprintf("#%02x%02x%02x", uint8(float64(r)+0.5), uint8(float64(g)*1.0+0.5), uint8(float64(b)*1.0+0.5)) //nolint:mnd // this is a rounding factor
 }
 
 func pieceXML(x, y int, p chess.Piece) string {
 	fileName := fmt.Sprintf("pieces/%s%s.svg", p.Color().String(), pieceTypeMap[p.Type()])
 	svgStr := string(internal.MustAsset(fileName))
 	old := `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="45" height="45">`
-	new := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="360" height="360" viewBox="%d %d 360 360">`, (-1 * x), (-1 * y))
-	return strings.Replace(svgStr, old, new, 1)
+	sprintf := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="360" height="360" viewBox="%d %d 360 360">`, -1*x, -1*y)
+	return strings.Replace(svgStr, old, sprintf, 1)
 }
 
-var (
-	pieceTypeMap = map[chess.PieceType]string{
-		chess.King:   "K",
-		chess.Queen:  "Q",
-		chess.Rook:   "R",
-		chess.Bishop: "B",
-		chess.Knight: "N",
-		chess.Pawn:   "P",
-	}
-)
+var pieceTypeMap = map[chess.PieceType]string{
+	chess.King:        "K",
+	chess.Queen:       "Q",
+	chess.Rook:        "R",
+	chess.Bishop:      "B",
+	chess.Knight:      "N",
+	chess.Pawn:        "P",
+	chess.NoPieceType: "",
+}

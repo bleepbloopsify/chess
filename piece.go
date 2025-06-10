@@ -1,16 +1,28 @@
 package chess
 
+import "strings"
+
 // Color represents the color of a chess piece.
 type Color int8
 
 const (
-	// NoColor represents no color
+	// NoColor represents no color.
 	NoColor Color = iota
-	// White represents the color white
+	// White represents the color white.
 	White
-	// Black represents the color black
+	// Black represents the color black.
 	Black
 )
+
+func ColorFromString(s string) Color {
+	switch strings.ToLower(s) {
+	case "w":
+		return White
+	case "b":
+		return Black
+	}
+	return NoColor
+}
 
 // Other returns the opposite color of the receiver.
 func (c Color) Other() Color {
@@ -23,7 +35,7 @@ func (c Color) Other() Color {
 	return NoColor
 }
 
-// String implements the fmt.Stringer interface and returns
+// String implements the fmt.Stringer interface and returns.
 // the color's FEN compatible notation.
 func (c Color) String() string {
 	switch c {
@@ -50,25 +62,50 @@ func (c Color) Name() string {
 type PieceType int8
 
 const (
-	// NoPieceType represents a lack of piece type
+	// NoPieceType represents a lack of piece type.
 	NoPieceType PieceType = iota
-	// King represents a king
+	// King represents a king.
 	King
-	// Queen represents a queen
+	// Queen represents a queen.
 	Queen
-	// Rook represents a rook
+	// Rook represents a rook.
 	Rook
-	// Bishop represents a bishop
+	// Bishop represents a bishop.
 	Bishop
-	// Knight represents a knight
+	// Knight represents a knight.
 	Knight
-	// Pawn represents a pawn
+	// Pawn represents a pawn.
 	Pawn
 )
 
 // PieceTypes returns a slice of all piece types.
 func PieceTypes() [6]PieceType {
 	return [6]PieceType{King, Queen, Rook, Bishop, Knight, Pawn}
+}
+
+func PieceTypeFromByte(b byte) PieceType {
+	switch b {
+	case 'k':
+		return King
+	case 'q':
+		return Queen
+	case 'r':
+		return Rook
+	case 'b':
+		return Bishop
+	case 'n':
+		return Knight
+	case 'p':
+		return Pawn
+	}
+	return NoPieceType
+}
+
+func PieceTypeFromString(s string) PieceType {
+	if len(s) != 1 {
+		return NoPieceType
+	}
+	return PieceTypeFromByte(strings.ToLower(s)[0])
 }
 
 func (p PieceType) String() string {
@@ -89,44 +126,80 @@ func (p PieceType) String() string {
 	return ""
 }
 
+func (p PieceType) Bytes() []byte {
+	switch p {
+	case King:
+		return []byte{'k'}
+	case Queen:
+		return []byte{'q'}
+	case Rook:
+		return []byte{'r'}
+	case Bishop:
+		return []byte{'b'}
+	case Knight:
+		return []byte{'n'}
+	case Pawn:
+		return []byte{'p'}
+	case NoPieceType:
+		return []byte{}
+	}
+	return []byte{}
+}
+
+func (p PieceType) ToPolyglotPromotionValue() int {
+	switch p {
+	case Knight:
+		return 1
+	case Bishop:
+		return 2
+	case Rook:
+		return 3
+	case Queen:
+		return 4
+	default:
+		return 0
+	}
+}
+
 // Piece is a piece type with a color.
 type Piece int8
 
 const (
-	// NoPiece represents no piece
+	// NoPiece represents no piece.
 	NoPiece Piece = iota
-	// WhiteKing is a white king
+	// WhiteKing is a white king.
 	WhiteKing
-	// WhiteQueen is a white queen
+	// WhiteQueen is a white queen.
 	WhiteQueen
-	// WhiteRook is a white rook
+	// WhiteRook is a white rook.
 	WhiteRook
-	// WhiteBishop is a white bishop
+	// WhiteBishop is a white bishop.
 	WhiteBishop
-	// WhiteKnight is a white knight
+	// WhiteKnight is a white knight.
 	WhiteKnight
-	// WhitePawn is a white pawn
+	// WhitePawn is a white pawn.
 	WhitePawn
-	// BlackKing is a black king
+	// BlackKing is a black king.
 	BlackKing
-	// BlackQueen is a black queen
+	// BlackQueen is a black queen.
 	BlackQueen
-	// BlackRook is a black rook
+	// BlackRook is a black rook.
 	BlackRook
-	// BlackBishop is a black bishop
+	// BlackBishop is a black bishop.
 	BlackBishop
-	// BlackKnight is a black knight
+	// BlackKnight is a black knight.
 	BlackKnight
-	// BlackPawn is a black pawn
+	// BlackPawn is a black pawn.
 	BlackPawn
 )
 
-var (
-	allPieces = []Piece{
-		WhiteKing, WhiteQueen, WhiteRook, WhiteBishop, WhiteKnight, WhitePawn,
-		BlackKing, BlackQueen, BlackRook, BlackBishop, BlackKnight, BlackPawn,
-	}
-)
+// TODO: This is a constant slice
+//
+//nolint:gochecknoglobals // This is a constant slice.
+var allPieces = []Piece{
+	WhiteKing, WhiteQueen, WhiteRook, WhiteBishop, WhiteKnight, WhitePawn,
+	BlackKing, BlackQueen, BlackRook, BlackBishop, BlackKnight, BlackPawn,
+}
 
 // NewPiece returns the piece matching the PieceType and Color.
 // NoPiece is returned if the PieceType or Color isn't valid.
@@ -169,20 +242,26 @@ func (p Piece) Color() Color {
 	return NoColor
 }
 
-// String implements the fmt.Stringer interface
+// String implements the fmt.Stringer interface.
 func (p Piece) String() string {
 	return pieceUnicodes[int(p)]
 }
 
-var (
-	pieceUnicodes = []string{" ", "♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"}
-)
+// TODO: This is a constant slice
+//
+//nolint:gochecknoglobals // This is a constant slice.
+var pieceUnicodes = []string{" ", "♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"}
 
-func (p Piece) getFENChar() string {
-	for key, piece := range fenPieceMap {
-		if piece == p {
-			return key
-		}
+// getFENChar returns the FEN character representation of a piece
+// Returns a single byte representing the piece.
+func (p Piece) getFENChar() byte {
+	pieceType := p.Type()
+	if pieceType < 0 || pieceType > 6 {
+		return 0 // Invalid piece type
 	}
-	return ""
+
+	if p.Color() == White {
+		return whitePiecesToFEN[pieceType]
+	}
+	return blackPiecesToFEN[pieceType]
 }

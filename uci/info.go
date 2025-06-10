@@ -12,11 +12,12 @@ import (
 // SearchResults is the result from the most recent CmdGo invocation.  It includes
 // data such as the following:
 // info depth 21 seldepth 31 multipv 1 score cp 39 nodes 862438 nps 860716 hashfull 409 tbhits 0 time 1002 pv e2e4
-// bestmove e2e4 ponder c7c5
+// bestmove e2e4 ponder c7c5.
 type SearchResults struct {
-	BestMove *chess.Move
-	Ponder   *chess.Move
-	Info     Info
+	BestMove    *chess.Move
+	Ponder      *chess.Move
+	Info        Info
+	MultiPVInfo []Info
 }
 
 // Info corresponds to the "info" engine output:
@@ -86,14 +87,14 @@ type SearchResults struct {
 //     If  is greater than 1, always send all k lines in k strings together.
 //     The engine should only send this if the option "UCI_ShowCurrLine" is set to true.
 type Info struct {
+	CurrentMove       *chess.Move
+	PV                []*chess.Move
+	Score             Score
 	Depth             int
 	Seldepth          int
-	PV                []*chess.Move
 	Multipv           int
 	Time              time.Duration
 	Nodes             int
-	Score             Score
-	CurrentMove       *chess.Move
 	CurrentMoveNumber int
 	Hashfull          int
 	NPS               int
@@ -119,9 +120,12 @@ type Score struct {
 	UpperBound bool
 }
 
-// UnmarshalText implements the encoding.TextUnmarshaler interface and parses
+// UnmarshalText implements the encoding.TextUnmarshaler interface and parses.
 // data like the following:
 // info depth 24 seldepth 32 multipv 1 score cp 29 nodes 5130101 nps 819897 hashfull 967 tbhits 0 time 6257 pv d2d4
+// TODO: Refactor this function to be shorter.
+//
+//nolint:funlen // This function is long because it has to parse a lot of different fields.
 func (info *Info) UnmarshalText(text []byte) error {
 	parts := strings.Split(string(text), " ")
 	if len(parts) == 0 {

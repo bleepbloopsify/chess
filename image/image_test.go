@@ -14,8 +14,10 @@ import (
 	"github.com/bleepbloopsify/chess/image"
 )
 
-const expectedMD5 = "08aaa6fcfde3bb900fc54bdfef3d5c81"
-const expectedMD5Black = "badac5ca5cfbdea9b98a1f9988ba54bc"
+const (
+	expectedMD5      = "08aaa6fcfde3bb900fc54bdfef3d5c81"
+	expectedMD5Black = "badac5ca5cfbdea9b98a1f9988ba54bc"
+)
 
 func TestSVG(t *testing.T) {
 	// create buffer of actual svg

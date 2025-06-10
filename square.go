@@ -10,25 +10,29 @@ type Square int8
 
 // File returns the square's file.
 func (sq Square) File() File {
-	return File(int(sq) % numOfSquaresInRow)
+	return File(sq % numOfSquaresInRow)
 }
 
 // Rank returns the square's rank.
 func (sq Square) Rank() Rank {
-	return Rank(int(sq) / numOfSquaresInRow)
+	return Rank(sq / numOfSquaresInRow)
 }
 
 func (sq Square) String() string {
 	return sq.File().String() + sq.Rank().String()
 }
 
-// NewSquare creates a new Square from a File and a Rank
+func (sq Square) Bytes() []byte {
+	return []byte{sq.File().Byte(), sq.Rank().Byte()}
+}
+
+// NewSquare creates a new Square from a File and a Rank.
 func NewSquare(f File, r Rank) Square {
 	return Square(int8(r)*numOfSquaresInRow + int8(f))
 }
 
 func (sq Square) color() Color {
-	if ((sq / 8) % 2) == (sq % 2) {
+	if ((sq / 8) % 2) == (sq % 2) { //nolint:mnd // this is a formula to determine the color of a square
 		return Black
 	}
 	return White
@@ -122,7 +126,11 @@ const (
 )
 
 func (r Rank) String() string {
-	return rankChars[r : r+1]
+	return rankChars[r : r+1] // r+1 is exclusive
+}
+
+func (r Rank) Byte() byte {
+	return rankChars[r]
 }
 
 // A File is the file of a square.
@@ -143,15 +151,20 @@ func (f File) String() string {
 	return fileChars[f : f+1]
 }
 
-var (
-	strToSquareMap = map[string]Square{
-		"a1": A1, "a2": A2, "a3": A3, "a4": A4, "a5": A5, "a6": A6, "a7": A7, "a8": A8,
-		"b1": B1, "b2": B2, "b3": B3, "b4": B4, "b5": B5, "b6": B6, "b7": B7, "b8": B8,
-		"c1": C1, "c2": C2, "c3": C3, "c4": C4, "c5": C5, "c6": C6, "c7": C7, "c8": C8,
-		"d1": D1, "d2": D2, "d3": D3, "d4": D4, "d5": D5, "d6": D6, "d7": D7, "d8": D8,
-		"e1": E1, "e2": E2, "e3": E3, "e4": E4, "e5": E5, "e6": E6, "e7": E7, "e8": E8,
-		"f1": F1, "f2": F2, "f3": F3, "f4": F4, "f5": F5, "f6": F6, "f7": F7, "f8": F8,
-		"g1": G1, "g2": G2, "g3": G3, "g4": G4, "g5": G5, "g6": G6, "g7": G7, "g8": G8,
-		"h1": H1, "h2": H2, "h3": H3, "h4": H4, "h5": H5, "h6": H6, "h7": H7, "h8": H8,
-	}
-)
+func (f File) Byte() byte {
+	return fileChars[f]
+}
+
+// TODO: This is a legacy map for converting strings to squares. (will be removed in the future)
+//
+//nolint:gochecknoglobals // this is a map of all squares
+var strToSquareMap = map[string]Square{
+	"a1": A1, "a2": A2, "a3": A3, "a4": A4, "a5": A5, "a6": A6, "a7": A7, "a8": A8,
+	"b1": B1, "b2": B2, "b3": B3, "b4": B4, "b5": B5, "b6": B6, "b7": B7, "b8": B8,
+	"c1": C1, "c2": C2, "c3": C3, "c4": C4, "c5": C5, "c6": C6, "c7": C7, "c8": C8,
+	"d1": D1, "d2": D2, "d3": D3, "d4": D4, "d5": D5, "d6": D6, "d7": D7, "d8": D8,
+	"e1": E1, "e2": E2, "e3": E3, "e4": E4, "e5": E5, "e6": E6, "e7": E7, "e8": E8,
+	"f1": F1, "f2": F2, "f3": F3, "f4": F4, "f5": F5, "f6": F6, "f7": F7, "f8": F8,
+	"g1": G1, "g2": G2, "g3": G3, "g4": G4, "g5": G5, "g6": G6, "g7": G7, "g8": G8,
+	"h1": H1, "h2": H2, "h3": H3, "h4": H4, "h5": H5, "h6": H6, "h7": H7, "h8": H8,
+}

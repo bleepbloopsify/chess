@@ -1,8 +1,12 @@
 package chess
 
-import "testing"
+import (
+	"testing"
+)
 
 var (
+	//noline:gochecknoglobals // This is a test file
+	// TODO: This is a legacy counter for generating unique labels. (will be removed in the future)
 	validFENs = []string{
 		"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
 		"rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
@@ -19,6 +23,8 @@ var (
 		"5k2/ppp5/4P3/3R3p/6P1/1K2Nr2/PP3P2/8 b - - 1 32",
 	}
 
+	//nolint:gochecknoglobals // test data
+	// TODO: This is a legacy counter for generating unique labels. (will be removed in the future)
 	invalidFENs = []string{
 		"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPP/RNBQKBNR w KQkq - 0 1",
 		"rnbqkbnr/pppppppp/8/8/4P2/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
@@ -50,5 +56,51 @@ func TestInvalidFENs(t *testing.T) {
 		if _, err := decodeFEN(f); err == nil {
 			t.Fatal("fen expected error from ", f)
 		}
+	}
+}
+
+func BenchmarkFenBoard(b *testing.B) {
+	// Test cases representing different scenarios
+	benchmarks := []struct {
+		name string
+		fen  string
+	}{
+		{
+			name: "StartingPosition",
+			fen:  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
+		},
+		{
+			name: "EmptyBoard",
+			fen:  "8/8/8/8/8/8/8/8",
+		},
+		{
+			name: "MidGame",
+			fen:  "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQK2R",
+		},
+		{
+			name: "ComplexPosition",
+			fen:  "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R",
+		},
+		{
+			name: "EndGame",
+			fen:  "4k3/8/8/8/8/8/4P3/4K3",
+		},
+	}
+
+	for _, bm := range benchmarks {
+		b.Run(bm.name, func(b *testing.B) {
+			// Reset the timer to exclude setup time
+			b.ResetTimer()
+			b.ReportAllocs()
+			// Run the benchmark
+			for i := 0; i < b.N; i++ {
+				board, err := fenBoard(bm.fen)
+				if err != nil {
+					b.Fatal(err)
+				}
+				// Prevent compiler optimizations
+				_ = board
+			}
+		})
 	}
 }

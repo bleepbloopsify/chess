@@ -13,15 +13,17 @@ import (
 // Engine represents a UCI compliant chess engine (e.g. Stockfish, Shredder, etc.).
 // Engine is safe for concurrent use.
 type Engine struct {
-	cmd     *exec.Cmd
-	in      *io.PipeWriter
-	out     *io.PipeReader
-	debug   bool
-	logger  *log.Logger
-	id      map[string]string
-	options map[string]Option
-	results SearchResults
-	mu      *sync.RWMutex
+	cmd      *exec.Cmd
+	in       *io.PipeWriter
+	out      *io.PipeReader
+	logger   *log.Logger
+	id       map[string]string
+	options  map[string]Option
+	mu       *sync.RWMutex
+	position *CmdPosition
+	results  SearchResults
+	eval     int
+	debug    bool
 }
 
 // Debug is an option for the New function to add logging for debugging.  This will
@@ -51,18 +53,20 @@ func New(path string, opts ...func(e *Engine)) (*Engine, error) {
 	cmd := exec.Command(path)
 	cmd.Stdin = rIn
 	cmd.Stdout = wOut
-	e := &Engine{cmd: cmd, in: wIn, out: rOut, mu: &sync.RWMutex{}, logger: log.New(os.Stdout, "uci", log.LstdFlags)}
+	e := &Engine{cmd: cmd, in: wIn, out: rOut, mu: &sync.RWMutex{}, logger: log.New(os.Stdout, "uci", log.LstdFlags), position: &CmdPosition{}, results: SearchResults{MultiPVInfo: []Info{}}}
 	for _, opt := range opts {
 		opt(e)
 	}
-	go e.cmd.Run()
+	go func() {
+		_ = e.cmd.Run()
+	}()
 	return e, nil
 }
 
 // ID returns the id values returned from the most recent CmdUCI invocation.  It includes
 // key value data such as the following:
 // id name Stockfish 12
-// id author the Stockfish developers (see AUTHORS file)
+// id author the Stockfish developers (see AUTHORS file).
 func (e *Engine) ID() map[string]string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -99,6 +103,7 @@ func (e *Engine) ID() map[string]string {
 // option name SyzygyProbeLimit type spin default 7 min 0 max 7
 // option name Use NNUE type check default true
 // option name EvalFile type string default nn-82215d0fd0df.nnue
+// The key is the option name and the value is the Option struct.
 func (e *Engine) Options() map[string]Option {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -113,11 +118,17 @@ func (e *Engine) Options() map[string]Option {
 // SearchResults returns results from the most recent CmdGo invocation.  It includes
 // data such as the following:
 // info depth 21 seldepth 31 multipv 1 score cp 39 nodes 862438 nps 860716 hashfull 409 tbhits 0 time 1002 pv e2e4
-// bestmove e2e4 ponder c7c5
+// bestmove e2e4 ponder c7c5.
 func (e *Engine) SearchResults() SearchResults {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.results
+}
+
+func (e *Engine) Eval() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.eval
 }
 
 // Run runs the set of Cmds in the order given and returns an error if
@@ -165,6 +176,12 @@ func (e *Engine) processCommand(cmd Cmd) error {
 	}
 	if _, err := fmt.Fprintln(e.in, cmd.String()); err != nil {
 		return err
+	}
+	if posCmd, ok := cmd.(*CmdPosition); ok {
+		e.position = posCmd
+	}
+	if posCmd, ok := cmd.(CmdPosition); ok {
+		e.position = &posCmd
 	}
 	if err := cmd.ProcessResponse(e); err != nil {
 		return err

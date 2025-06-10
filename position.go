@@ -1,3 +1,22 @@
+/*
+Package chess provides position representation and manipulation for chess games.
+The package implements complete position tracking including piece placement,
+castling rights, en passant squares, and move counts. It supports standard chess
+formats (FEN) and provides methods for position analysis and move validation.
+Example usage:
+
+	// Create starting position
+	pos := StartingPosition()
+
+	// Check valid moves
+	moves := pos.ValidMoves()
+
+	// Update position with move
+	newPos := pos.Update(move)
+
+	// Get FEN string
+	fen := pos.String()
+*/
 package chess
 
 import (
@@ -22,8 +41,13 @@ const (
 // CastleRights holds the state of both sides castling abilities.
 type CastleRights string
 
-// CanCastle returns true if the given color and side combination
-// can castle, otherwise returns false.
+// CanCastle returns true if the given color and side combination can castle.
+//
+// Example:
+//
+//	if rights.CanCastle(White, KingSide) {
+//	    // White can castle kingside
+//	}
 func (cr CastleRights) CanCastle(c Color, side Side) bool {
 	char := "k"
 	if side == QueenSide {
@@ -36,44 +60,62 @@ func (cr CastleRights) CanCastle(c Color, side Side) bool {
 }
 
 // String implements the fmt.Stringer interface and returns
-// a FEN compatible string.  Ex. KQq
+// a FEN compatible string.  Ex. KQq.
 func (cr CastleRights) String() string {
 	return string(cr)
 }
 
-// Position represents the state of the game without reguard
-// to its outcome.  Position is translatable to FEN notation.
+// Position represents a complete chess position state.
+// It includes piece placement, castling rights, en passant squares,
+// move counts, and side to move.
 type Position struct {
-	board           *Board
-	turn            Color
-	castleRights    CastleRights
-	enPassantSquare Square
-	halfMoveClock   int
-	moveCount       int
-	inCheck         bool
-	validMoves      []*Move
+	board           *Board       // Current board state
+	castleRights    CastleRights // Available castling options
+	validMoves      []Move       // Cache of legal moves
+	halfMoveClock   int          // Half-move counter
+	moveCount       int          // Full move counter
+	turn            Color        // Side to move
+	enPassantSquare Square       // En passant target square
+	inCheck         bool         // Whether current side is in check
 }
 
 const (
-	startFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+	startFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" // Starting position FEN
 )
 
 // StartingPosition returns the starting position
-// rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+// rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1.
 func StartingPosition() *Position {
 	pos, _ := decodeFEN(startFEN)
 	return pos
 }
 
 // Update returns a new position resulting from the given move.
-// The move itself isn't validated, if validation is needed use
-// Game's Move method.  This method is more performant for bots that
-// rely on the ValidMoves because it skips redundant validation.
+// The move isn't validated - use Game.Move() for validation.
+// This method is optimized for move generation where validation
+// is handled separately.
+//
+// Example:
+//
+//	newPos := pos.Update(move)
 func (pos *Position) Update(m *Move) *Position {
 	moveCount := pos.moveCount
 	if pos.turn == Black {
 		moveCount++
 	}
+
+	if m == nil {
+		return &Position{
+			board:           pos.board.copy(),
+			turn:            pos.turn.Other(),
+			castleRights:    pos.castleRights,
+			enPassantSquare: NoSquare,
+			halfMoveClock:   pos.halfMoveClock + 1,
+			moveCount:       moveCount,
+			inCheck:         false,
+		}
+	}
+
 	ncr := pos.updateCastleRights(m)
 	p := pos.board.Piece(m.s1)
 	halfMove := pos.halfMoveClock
@@ -95,13 +137,15 @@ func (pos *Position) Update(m *Move) *Position {
 	}
 }
 
-// ValidMoves returns a list of valid moves for the position.
-func (pos *Position) ValidMoves() []*Move {
+// ValidMoves returns all legal moves in the current position.
+// The moves are cached for performance.
+// TODO: Can we make this more efficient? Maybe using an iterator?
+func (pos *Position) ValidMoves() []Move {
 	if pos.validMoves != nil {
-		return append([]*Move(nil), pos.validMoves...)
+		return append([]Move(nil), pos.validMoves...)
 	}
 	pos.validMoves = engine{}.CalcMoves(pos, false)
-	return append([]*Move(nil), pos.validMoves...)
+	return append([]Move(nil), pos.validMoves...)
 }
 
 // Status returns the position's status as one of the outcome methods.
@@ -122,7 +166,12 @@ func (pos *Position) Turn() Color {
 
 func (pos *Position) SetTurn(c Color) (p *Position) {
 	pos.turn = c
+	return pos
+}
 
+// ChangeTurn returns a new position with the turn changed.
+func (pos *Position) ChangeTurn() *Position {
+	pos.turn = pos.turn.Other()
 	return pos
 }
 
@@ -149,7 +198,7 @@ func (pos *Position) CastleRights() CastleRights {
 }
 
 // String implements the fmt.Stringer interface and returns a
-// string with the FEN format: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+// string with the FEN format: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1.
 func (pos *Position) String() string {
 	b := pos.board.String()
 	t := pos.turn.String()
@@ -161,7 +210,7 @@ func (pos *Position) String() string {
 	return fmt.Sprintf("%s %s %s %s %d %d", b, t, c, sq, pos.halfMoveClock, pos.moveCount)
 }
 
-// Hash returns a unique hash of the position
+// Hash returns a unique hash of the position.
 func (pos *Position) Hash() [16]byte {
 	b, _ := pos.MarshalBinary()
 	return md5.Sum(b)
@@ -169,7 +218,7 @@ func (pos *Position) Hash() [16]byte {
 
 // MarshalText implements the encoding.TextMarshaler interface and
 // encodes the position's FEN.
-func (pos *Position) MarshalText() (text []byte, err error) {
+func (pos *Position) MarshalText() ([]byte, error) {
 	return []byte(pos.String()), nil
 }
 
@@ -199,50 +248,51 @@ const (
 	bitsHasEnPassant
 )
 
-// MarshalBinary implements the encoding.BinaryMarshaler interface
-func (pos *Position) MarshalBinary() (data []byte, err error) {
+// MarshalBinary implements the encoding.BinaryMarshaler interface.
+func (pos *Position) MarshalBinary() ([]byte, error) {
 	boardBytes, err := pos.board.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 	buf := bytes.NewBuffer(boardBytes)
-	if err := binary.Write(buf, binary.BigEndian, uint8(pos.halfMoveClock)); err != nil {
+	if err = binary.Write(buf, binary.BigEndian, uint8(pos.halfMoveClock)); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(buf, binary.BigEndian, uint16(pos.moveCount)); err != nil {
+	if err = binary.Write(buf, binary.BigEndian, uint16(pos.moveCount)); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(buf, binary.BigEndian, pos.enPassantSquare); err != nil {
+	if err = binary.Write(buf, binary.BigEndian, pos.enPassantSquare); err != nil {
 		return nil, err
 	}
 	var b uint8
 	if pos.castleRights.CanCastle(White, KingSide) {
-		b = b | bitsCastleWhiteKing
+		b |= bitsCastleWhiteKing
 	}
 	if pos.castleRights.CanCastle(White, QueenSide) {
-		b = b | bitsCastleWhiteQueen
+		b |= bitsCastleWhiteQueen
 	}
 	if pos.castleRights.CanCastle(Black, KingSide) {
-		b = b | bitsCastleBlackKing
+		b |= bitsCastleBlackKing
 	}
 	if pos.castleRights.CanCastle(Black, QueenSide) {
-		b = b | bitsCastleBlackQueen
+		b |= bitsCastleBlackQueen
 	}
 	if pos.turn == Black {
-		b = b | bitsTurn
+		b |= bitsTurn
 	}
 	if pos.enPassantSquare != NoSquare {
-		b = b | bitsHasEnPassant
+		b |= bitsHasEnPassant
 	}
-	if err := binary.Write(buf, binary.BigEndian, b); err != nil {
+	if err = binary.Write(buf, binary.BigEndian, b); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), err
 }
 
-// UnmarshalBinary implements the encoding.BinaryMarshaler interface
+// UnmarshalBinary implements the encoding.BinaryMarshaler interface.
 func (pos *Position) UnmarshalBinary(data []byte) error {
-	if len(data) != 101 {
+	const size = 101
+	if len(data) != size {
 		return errors.New("chess: position binary data should consist of 101 bytes")
 	}
 	board := &Board{}
@@ -311,16 +361,16 @@ func (pos *Position) updateCastleRights(m *Move) CastleRights {
 	cr := string(pos.castleRights)
 	p := pos.board.Piece(m.s1)
 	if p == WhiteKing || m.s1 == H1 || m.s2 == H1 {
-		cr = strings.Replace(cr, "K", "", -1)
+		cr = strings.ReplaceAll(cr, "K", "")
 	}
 	if p == WhiteKing || m.s1 == A1 || m.s2 == A1 {
-		cr = strings.Replace(cr, "Q", "", -1)
+		cr = strings.ReplaceAll(cr, "Q", "")
 	}
 	if p == BlackKing || m.s1 == H8 || m.s2 == H8 {
-		cr = strings.Replace(cr, "k", "", -1)
+		cr = strings.ReplaceAll(cr, "k", "")
 	}
 	if p == BlackKing || m.s1 == A8 || m.s2 == A8 {
-		cr = strings.Replace(cr, "q", "", -1)
+		cr = strings.ReplaceAll(cr, "q", "")
 	}
 	if cr == "" {
 		cr = "-"
@@ -329,6 +379,7 @@ func (pos *Position) updateCastleRights(m *Move) CastleRights {
 }
 
 func (pos *Position) updateEnPassantSquare(m *Move) Square {
+	const squaresPerRank = 8
 	p := pos.board.Piece(m.s1)
 	if p.Type() != Pawn {
 		return NoSquare
@@ -336,15 +387,16 @@ func (pos *Position) updateEnPassantSquare(m *Move) Square {
 	if pos.turn == White &&
 		(bbForSquare(m.s1)&bbRank2) != 0 &&
 		(bbForSquare(m.s2)&bbRank4) != 0 {
-		return Square(m.s2 - 8)
+		return m.s2 - squaresPerRank
 	} else if pos.turn == Black &&
 		(bbForSquare(m.s1)&bbRank7) != 0 &&
 		(bbForSquare(m.s2)&bbRank5) != 0 {
-		return Square(m.s2 + 8)
+		return m.s2 + squaresPerRank
 	}
 	return NoSquare
 }
 
+// samePosition returns true if the two positions are the same.
 func (pos *Position) samePosition(pos2 *Position) bool {
 	return pos.board.String() == pos2.board.String() &&
 		pos.turn == pos2.turn &&

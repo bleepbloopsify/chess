@@ -1,5 +1,8 @@
 module github.com/bleepbloopsify/chess
 
-go 1.14
+go 1.22.0
 
-require github.com/ajstarks/svgo v0.0.0-20200320125537-f189e35d30ca
+require (
+	github.com/ajstarks/svgo v0.0.0-20211024235047-1546f124cd8b
+	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c
+)

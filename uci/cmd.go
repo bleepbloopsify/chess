@@ -4,21 +4,23 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bleepbloopsify/chess"
 )
 
-// Cmd is a UCI compliant command
+// Cmd is a UCI compliant command.
 type Cmd interface {
 	fmt.Stringer
 	ProcessResponse(e *Engine) error
 }
 
 type cmdNoOptions struct {
-	Name string
 	F    func(e *Engine) error
+	Name string
 }
 
 func (cmd cmdNoOptions) String() string {
@@ -38,6 +40,8 @@ var (
 	// and sent the "option" commands to tell the GUI which engine settings the engine supports if any.
 	// After that the engine should sent "uciok" to acknowledge the uci mode.
 	// If no uciok is sent within a certain time period, the engine task will be killed by the GUI.
+	//nolint:gochecknoglobals // Will need to improve this
+	// TODO: Remove global variable
 	CmdUCI = cmdNoOptions{Name: "uci", F: func(e *Engine) error {
 		e.id = map[string]string{}
 		e.options = map[string]Option{}
@@ -92,27 +96,50 @@ var (
 	// So the engine should not rely on this command even though all new GUIs should support it.
 	// As the engine's reaction to "ucinewgame" can take some time the GUI should always send "isready"
 	// after "ucinewgame" to wait for the engine to finish its operation.
-	CmdUCINewGame = cmdNoOptions{Name: "ucinewgame", F: func(e *Engine) error {
+	CmdUCINewGame = cmdNoOptions{Name: "ucinewgame", F: func(_ *Engine) error {
 		return nil
 	}}
 
 	// CmdPonderHit corresponds to the "ponderhit" command:
 	// the user has played the expected move. This will be sent if the engine was told to ponder on the same move
 	// the user has played. The engine should continue searching but switch from pondering to normal search.
-	CmdPonderHit = cmdNoOptions{Name: "ponderhit", F: func(e *Engine) error {
+	CmdPonderHit = cmdNoOptions{Name: "ponderhit", F: func(_ *Engine) error {
 		return nil
 	}}
 
 	// CmdStop corresponds to the "stop" command:
 	// stop calculating as soon as possible,
-	// don't forget the "bestmove" and possibly the "ponder" token when finishing the search
-	CmdStop = cmdNoOptions{Name: "stop", F: func(e *Engine) error {
+	// don't forget the "bestmove" and possibly the "ponder" token when finishing the search.
+	CmdStop = cmdNoOptions{Name: "stop", F: func(_ *Engine) error {
 		return nil
 	}}
 
 	// CmdQuit (shouldn't be used directly as its handled by Engine.Close()) corresponds to the "quit" command:
-	// quit the program as soon as possible
-	CmdQuit = cmdNoOptions{Name: "quit", F: func(e *Engine) error {
+	// quit the program as soon as possible.
+	CmdQuit = cmdNoOptions{Name: "quit", F: func(_ *Engine) error {
+		return nil
+	}}
+
+	// CmdEval is a non-standard command that requests the engine's static evaluation of the current position.
+	CmdEval = cmdNoOptions{Name: "eval", F: func(e *Engine) error {
+		scanner := bufio.NewScanner(e.out)
+		for scanner.Scan() {
+			text := e.readLine(scanner)
+			if strings.Contains(text, "error") {
+				return errors.New("eval command not supported")
+			}
+			if strings.HasPrefix(text, "Final evaluation") {
+				parts := strings.Fields(text)
+				if len(parts) >= 3 {
+					evalStr := parts[2]
+					eval, err := strconv.ParseFloat(evalStr, 64)
+					if err == nil {
+						e.eval = int(math.Round(eval * 100))
+					}
+					break
+				}
+			}
+		}
 		return nil
 	}}
 )
@@ -140,8 +167,8 @@ func (cmd CmdSetOption) String() string {
 	return fmt.Sprintf("setoption name %s value %s", cmd.Name, cmd.Value)
 }
 
-// ProcessResponse implements the Cmd interface
-func (cmd CmdSetOption) ProcessResponse(e *Engine) error {
+// ProcessResponse implements the Cmd interface.
+func (cmd CmdSetOption) ProcessResponse(_ *Engine) error {
 	return nil
 }
 
@@ -171,8 +198,8 @@ func (cmd CmdPosition) String() string {
 	return fmt.Sprintf("position fen %s moves %s", cmd.Position, strings.Join(moveStrs, " "))
 }
 
-// ProcessResponse implements the Cmd interface
-func (CmdPosition) ProcessResponse(e *Engine) error {
+// ProcessResponse implements the Cmd interface.
+func (CmdPosition) ProcessResponse(_ *Engine) error {
 	return nil
 }
 
@@ -218,7 +245,6 @@ func (CmdPosition) ProcessResponse(e *Engine) error {
 //     search until the "stop" command. Do not exit the search without being told so in this mode!
 type CmdGo struct {
 	SearchMoves    []*chess.Move
-	Ponder         bool
 	WhiteTime      time.Duration
 	BlackTime      time.Duration
 	WhiteIncrement time.Duration
@@ -228,6 +254,7 @@ type CmdGo struct {
 	Nodes          int
 	Mate           int
 	MoveTime       time.Duration
+	Ponder         bool
 	Infinite       bool
 }
 
@@ -249,16 +276,16 @@ func (cmd CmdGo) String() string {
 		a = append(a, "binc", msecStr(cmd.BlackIncrement))
 	}
 	if cmd.MovesToGo > 0 {
-		a = append(a, "movestogo", fmt.Sprint(cmd.MovesToGo))
+		a = append(a, "movestogo", strconv.Itoa(cmd.MovesToGo))
 	}
 	if cmd.Depth > 0 {
-		a = append(a, "depth", fmt.Sprint(cmd.Depth))
+		a = append(a, "depth", strconv.Itoa(cmd.Depth))
 	}
 	if cmd.Nodes > 0 {
-		a = append(a, "nodes", fmt.Sprint(cmd.Nodes))
+		a = append(a, "nodes", strconv.Itoa(cmd.Nodes))
 	}
 	if cmd.Mate > 0 {
-		a = append(a, "mate", fmt.Sprint(cmd.Nodes))
+		a = append(a, "mate", strconv.Itoa(cmd.Mate))
 	}
 	if cmd.MoveTime > 0 {
 		a = append(a, "movetime", msecStr(cmd.MoveTime))
@@ -276,10 +303,15 @@ func (cmd CmdGo) String() string {
 	return strings.Join(a, " ")
 }
 
-// ProcessResponse implements the Cmd interface
+// ProcessResponse implements the Cmd interface.
+// TODO: Refactor this function to be shorter and more readable.
+//
+//nolint:nestif // work to be done
 func (CmdGo) ProcessResponse(e *Engine) error {
+	const maxParts = 4
+
 	scanner := bufio.NewScanner(e.out)
-	results := SearchResults{}
+	results := SearchResults{MultiPVInfo: make([]Info, 1)}
 	for scanner.Scan() {
 		text := e.readLine(scanner)
 		if strings.HasPrefix(text, "bestmove") {
@@ -287,15 +319,21 @@ func (CmdGo) ProcessResponse(e *Engine) error {
 			if len(parts) <= 1 {
 				return errors.New("best move not found " + text)
 			}
-			bestMove, err := chess.UCINotation{}.Decode(nil, parts[1])
+			var position *chess.Position
+			if e.position != nil {
+				position = e.position.Position
+			} else {
+				position = nil
+			}
+			bestMove, err := chess.UCINotation{}.Decode(position, parts[1])
 			if err != nil {
 				return err
 			}
 			results.BestMove = bestMove
-			if len(parts) >= 4 {
-				ponderMove, err := chess.UCINotation{}.Decode(nil, parts[3])
-				if err != nil {
-					return err
+			if len(parts) >= maxParts {
+				ponderMove, decodeErr := chess.UCINotation{}.Decode(position, parts[3])
+				if decodeErr != nil {
+					return decodeErr
 				}
 				results.Ponder = ponderMove
 			}
@@ -304,25 +342,42 @@ func (CmdGo) ProcessResponse(e *Engine) error {
 
 		info := &Info{}
 		err := info.UnmarshalText([]byte(text))
-		if err == nil {
+		if err != nil {
+			continue
+		}
+
+		if info.Multipv == 0 || info.Multipv == 1 {
 			results.Info = *info
 		}
+
+		if info.Multipv > 1 && info.Multipv < 300 {
+			currentPVCount := len(results.MultiPVInfo)
+			if info.Multipv > currentPVCount {
+				for i := currentPVCount; i < info.Multipv; i++ {
+					results.MultiPVInfo = append(results.MultiPVInfo, Info{})
+				}
+			}
+			results.MultiPVInfo[info.Multipv-1] = *info
+		}
 	}
+	results.MultiPVInfo[0] = results.Info
 	e.results = results
 	return nil
 }
 
 func parseIDLine(s string) (string, string, error) {
-	if strings.HasPrefix(s, "id") == false {
+	const numParts = 3
+	if !strings.HasPrefix(s, "id") {
 		return "", "", errors.New("uci: invalid id line")
 	}
 	parts := strings.Split(s, " ")
-	if len(parts) < 3 {
+
+	if len(parts) < numParts {
 		return "", "", errors.New("uci: invalid id line")
 	}
 	return parts[1], strings.Join(parts[2:], " "), nil
 }
 
 func msecStr(dur time.Duration) string {
-	return fmt.Sprint(int(dur / time.Millisecond))
+	return strconv.Itoa(int(dur / time.Millisecond))
 }

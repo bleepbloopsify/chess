@@ -9,10 +9,10 @@ import (
 
 // A Opening represents a specific sequence of moves from the staring position.
 type Opening struct {
+	game  *chess.Game
 	code  string
 	title string
 	pgn   string
-	game  *chess.Game
 }
 
 // Code returns the Encyclopaedia of Chess Openings (ECO) code.
@@ -39,7 +39,7 @@ func (o *Opening) Game() *chess.Game {
 	return o.game
 }
 
-// Book is an opening book that returns openings for move sequences
+// Book is an opening book that returns openings for move sequences.
 type Book interface {
 	// Find returns the most specific opening for the list of moves.  If no opening is found, Find returns nil.
 	Find(moves []*chess.Move) *Opening

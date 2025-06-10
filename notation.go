@@ -4,7 +4,75 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
+
+// moveComponents represents the parsed components of an algebraic notation move.
+type moveComponents struct {
+	piece      string
+	originFile string
+	originRank string
+	capture    string
+	file       string
+	rank       string
+	promotes   string
+	castles    string
+}
+
+// emptyComponents is an empty moveComponents struct
+//
+//nolint:gochecknoglobals // false positive.
+var emptyComponents = moveComponents{}
+
+// pgnRegex is a regular expression to parse PGN strings
+//
+//nolint:gochecknoglobals // false positive.
+var pgnRegex = regexp.MustCompile(`^(?:([RNBQKP]?)([abcdefgh]?)(\d?)(x?)([abcdefgh])(\d)(=[QRBN])?|(O-O(?:-O)?))([+#!?]|e\.p\.)*$`)
+
+const piecesPoolCapacity = 4
+
+// Use string pools for common strings to reduce allocations.
+var (
+	//nolint:gochecknoglobals // false positive
+	stringPool = sync.Pool{
+		New: func() interface{} {
+			return new(strings.Builder)
+		},
+	}
+
+	// Pre-allocate slices for options to avoid allocations in hot path
+	//nolint:gochecknoglobals // false positive
+	pieceOptionsPool = sync.Pool{
+		New: func() interface{} {
+			s := make([]string, 0, piecesPoolCapacity)
+			return &s // Return pointer to slice
+		},
+	}
+)
+
+// Constants for common strings to avoid allocations.
+const (
+	kingStr    = "K"
+	queenStr   = "Q"
+	rookStr    = "R"
+	bishopStr  = "B"
+	knightStr  = "N"
+	castleKS   = "O-O"
+	castleQS   = "O-O-O"
+	equalStr   = "="
+	checkStr   = "+"
+	mateStr    = "#"
+	captureStr = "x"
+)
+
+// Pre-allocate piece type maps for faster lookups.
+var pieceTypeToChar = map[PieceType]string{
+	King:   kingStr,
+	Queen:  queenStr,
+	Rook:   rookStr,
+	Bishop: bishopStr,
+	Knight: knightStr,
+}
 
 // Encoder is the interface implemented by objects that can
 // encode a move into a string given the position.  It is not
@@ -30,7 +98,7 @@ type Notation interface {
 
 // UCINotation is a more computer friendly alternative to algebraic
 // notation.  This notation uses the same format as the UCI (Universal Chess
-// Interface).  Examples: e2e4, e7e5, e1g1 (white short castling), e7e8q (for promotion)
+// Interface).  Examples: e2e4, e7e5, e1g1 (white short castling), e7e8q (for promotion).
 type UCINotation struct{}
 
 // String implements the fmt.Stringer interface and returns
@@ -40,58 +108,70 @@ func (UCINotation) String() string {
 }
 
 // Encode implements the Encoder interface.
-func (UCINotation) Encode(pos *Position, m *Move) string {
-	return m.S1().String() + m.S2().String() + m.Promo().String()
+func (UCINotation) Encode(_ *Position, m *Move) string {
+	const maxLen = 5
+	// Get a string builder from the pool
+	sb, _ := stringPool.Get().(*strings.Builder)
+	sb.Reset()
+	defer stringPool.Put(sb)
+
+	// Exact size needed: 4 chars for squares + up to 1 for promotion
+	sb.Grow(maxLen)
+
+	sb.Write(m.S1().Bytes())
+	sb.Write(m.S2().Bytes())
+	if m.Promo() != NoPieceType {
+		sb.Write(m.Promo().Bytes())
+	}
+
+	return sb.String()
 }
 
 // Decode implements the Decoder interface.
 func (UCINotation) Decode(pos *Position, s string) (*Move, error) {
+	const promoLen = 5
+
 	l := len(s)
-	err := fmt.Errorf(`chess: failed to decode long algebraic notation text "%s" for position %s`, s, pos)
 	if l < 4 || l > 5 {
-		return nil, err
+		return nil, fmt.Errorf("chess: invalid UCI notation length %d in %q", l, s)
 	}
-	s1, ok := strToSquareMap[s[0:2]]
-	if !ok {
-		return nil, err
+
+	// Convert directly instead of using map lookups
+	s1 := Square((s[0] - 'a') + (s[1]-'1')*8)
+	s2 := Square((s[2] - 'a') + (s[3]-'1')*8)
+
+	if s1 < A1 || s1 > H8 || s2 < A1 || s2 > H8 {
+		return nil, fmt.Errorf("chess: invalid squares in UCI notation %q", s)
 	}
-	s2, ok := strToSquareMap[s[2:4]]
-	if !ok {
-		return nil, err
-	}
-	promo := NoPieceType
-	if l == 5 {
-		promo = pieceTypeFromChar(s[4:5])
+
+	m := Move{s1: s1, s2: s2}
+
+	// Promotion (Use a precomputed lookup)
+	if l == promoLen {
+		promoMap := [256]PieceType{
+			'n': Knight, 'b': Bishop, 'r': Rook, 'q': Queen,
+		}
+		promo := promoMap[s[4]]
 		if promo == NoPieceType {
-			return nil, err
+			return nil, fmt.Errorf("chess: invalid promotion piece in UCI notation %q", s)
 		}
+		m.promo = promo
 	}
-	m := &Move{s1: s1, s2: s2, promo: promo}
+
 	if pos == nil {
-		return m, nil
+		return &m, nil
 	}
-	p := pos.Board().Piece(s1)
-	if p.Type() == King {
-		if (s1 == E1 && s2 == G1) || (s1 == E8 && s2 == G8) {
-			m.addTag(KingSideCastle)
-		} else if (s1 == E1 && s2 == C1) || (s1 == E8 && s2 == C8) {
-			m.addTag(QueenSideCastle)
-		}
-	} else if p.Type() == Pawn && s2 == pos.enPassantSquare {
-		m.addTag(EnPassant)
-		m.addTag(Capture)
-	}
-	c1 := p.Color()
-	c2 := pos.Board().Piece(s2).Color()
-	if c2 != NoColor && c1 != c2 {
-		m.addTag(Capture)
-	}
-	return m, nil
+
+	addTags(&m, pos)
+
+	m.position = pos.Update(&m)
+
+	return &m, nil
 }
 
 // AlgebraicNotation (or Standard Algebraic Notation) is the
 // official chess notation used by FIDE. Examples: e4, e5,
-// O-O (short castling), e8=Q (promotion)
+// O-O (short castling), e8=Q (promotion).
 type AlgebraicNotation struct{}
 
 // String implements the fmt.Stringer interface and returns
@@ -102,86 +182,196 @@ func (AlgebraicNotation) String() string {
 
 // Encode implements the Encoder interface.
 func (AlgebraicNotation) Encode(pos *Position, m *Move) string {
+	// Handle castling without builder
 	checkChar := getCheckChar(pos, m)
 	if m.HasTag(KingSideCastle) {
-		return "O-O" + checkChar
-	} else if m.HasTag(QueenSideCastle) {
-		return "O-O-O" + checkChar
+		return castleKS + checkChar
 	}
+	if m.HasTag(QueenSideCastle) {
+		return castleQS + checkChar
+	}
+
+	// Get a string builder from the pool
+	sb, _ := stringPool.Get().(*strings.Builder)
+	sb.Reset()
+	defer stringPool.Put(sb)
+
 	p := pos.Board().Piece(m.S1())
-	pChar := charFromPieceType(p.Type())
-	s1Str := formS1(pos, m)
-	capChar := ""
-	if m.HasTag(Capture) || m.HasTag(EnPassant) {
-		capChar = "x"
-		if p.Type() == Pawn && s1Str == "" {
-			capChar = m.s1.File().String() + "x"
-		}
+	if pChar := pieceTypeToChar[p.Type()]; pChar != "" {
+		sb.WriteString(pChar)
 	}
-	promoText := charForPromo(m.promo)
-	return pChar + s1Str + capChar + m.s2.String() + promoText + checkChar
+
+	if s1Str := formS1(pos, m); s1Str != "" {
+		sb.WriteString(s1Str)
+	}
+
+	if m.HasTag(Capture) || m.HasTag(EnPassant) {
+		if p.Type() == Pawn && sb.Len() == 0 {
+			sb.WriteString(m.s1.File().String())
+		}
+		sb.WriteString(captureStr)
+	}
+
+	sb.WriteString(m.s2.String())
+
+	if m.promo != NoPieceType {
+		sb.WriteString(equalStr)
+		sb.WriteString(pieceTypeToChar[m.promo])
+	}
+
+	sb.WriteString(getCheckChar(pos, m))
+	return sb.String()
 }
 
-var pgnRegex = regexp.MustCompile(`^(?:([RNBQKP]?)([abcdefgh]?)(\d?)(x?)([abcdefgh])(\d)(=[QRBN])?|(O-O(?:-O)?))([+#!?]|e\.p\.)*$`)
-
-func algebraicNotationParts(s string) (string, string, string, string, string, string, string, string, error) {
+// algebraicNotationParts parses a move string into its components.
+func algebraicNotationParts(s string) (moveComponents, error) {
 	submatches := pgnRegex.FindStringSubmatch(s)
 	if len(submatches) == 0 {
-		return "", "", "", "", "", "", "", "", fmt.Errorf("could not decode algebraic notation %s", s)
+		return emptyComponents, fmt.Errorf("chess: invalid algebraic notation %s", s)
 	}
 
-	return submatches[1], submatches[2], submatches[3], submatches[4], submatches[5], submatches[6], submatches[7], submatches[8], nil
+	// Return struct instead of multiple returns
+	return moveComponents{
+		piece:      submatches[1],
+		originFile: submatches[2],
+		originRank: submatches[3],
+		capture:    submatches[4],
+		file:       submatches[5],
+		rank:       submatches[6],
+		promotes:   submatches[7],
+		castles:    submatches[8],
+	}, nil
+}
+
+// cleanMove creates a standardized string from move components.
+func (mc moveComponents) clean() string {
+	// Get a string builder from pool
+	sb, _ := stringPool.Get().(*strings.Builder)
+	sb.Reset()
+	defer stringPool.Put(sb)
+
+	sb.WriteString(mc.piece)
+	sb.WriteString(mc.originFile)
+	sb.WriteString(mc.originRank)
+	sb.WriteString(mc.capture)
+	sb.WriteString(mc.file)
+	sb.WriteString(mc.rank)
+	sb.WriteString(mc.promotes)
+	sb.WriteString(mc.castles)
+
+	return sb.String()
+}
+
+// generateMoveOptions creates possible alternative notations for a move.
+func (mc moveComponents) generateOptions() []string {
+	// Get pre-allocated slice from pool
+	options := pieceOptionsPool.Get().(*[]string)
+	*options = (*options)[:0]           // Clear but keep capacity
+	defer pieceOptionsPool.Put(options) // Now passing pointer
+
+	// Build move options using string builder for efficiency
+	sb, _ := stringPool.Get().(*strings.Builder)
+	defer stringPool.Put(sb)
+
+	if mc.piece != "" {
+		// Option 1: no origin coordinates
+		sb.Reset()
+		sb.WriteString(mc.piece)
+		sb.WriteString(mc.capture)
+		sb.WriteString(mc.file)
+		sb.WriteString(mc.rank)
+		sb.WriteString(mc.promotes)
+		sb.WriteString(mc.castles)
+		*options = append(*options, sb.String())
+
+		// Option 2: with rank, no file
+		sb.Reset()
+		sb.WriteString(mc.piece)
+		sb.WriteString(mc.originRank)
+		sb.WriteString(mc.capture)
+		sb.WriteString(mc.file)
+		sb.WriteString(mc.rank)
+		sb.WriteString(mc.promotes)
+		sb.WriteString(mc.castles)
+		*options = append(*options, sb.String())
+
+		// Option 3: with file, no rank
+		sb.Reset()
+		sb.WriteString(mc.piece)
+		sb.WriteString(mc.originFile)
+		sb.WriteString(mc.capture)
+		sb.WriteString(mc.file)
+		sb.WriteString(mc.rank)
+		sb.WriteString(mc.promotes)
+		sb.WriteString(mc.castles)
+		*options = append(*options, sb.String())
+	} else {
+		if mc.capture != "" {
+			// Pawn capture without rank
+			sb.Reset()
+			sb.WriteString(mc.originFile)
+			sb.WriteString(mc.capture)
+			sb.WriteString(mc.file)
+			sb.WriteString(mc.rank)
+			sb.WriteString(mc.promotes)
+			*options = append(*options, sb.String())
+		}
+		if mc.originFile != "" && mc.originRank != "" {
+			// Full coordinates version
+			sb.Reset()
+			sb.WriteString(mc.capture)
+			sb.WriteString(mc.file)
+			sb.WriteString(mc.rank)
+			sb.WriteString(mc.promotes)
+			*options = append(*options, sb.String())
+		}
+	}
+
+	return *options
 }
 
 // Decode implements the Decoder interface.
 func (AlgebraicNotation) Decode(pos *Position, s string) (*Move, error) {
-	piece, originFile, originRank, capture, file, rank, promotes, castles, err := algebraicNotationParts(s)
+	// Parse move components
+	components, err := algebraicNotationParts(s)
 	if err != nil {
-		return nil, fmt.Errorf("chess: %+v for position %s", err, pos.String())
+		return nil, err
 	}
 
+	// Get cleaned input move
+	cleanedInput := components.clean()
+
+	// Try matching against valid moves
 	for _, m := range pos.ValidMoves() {
-		moveStr := AlgebraicNotation{}.Encode(pos, m)
-		moveSubmatches := pgnRegex.FindStringSubmatch(moveStr)
-		moveCleaned := strings.Join(moveSubmatches[1:9], "")
+		// Encode current move
+		moveStr := AlgebraicNotation{}.Encode(pos, &m)
 
-		cleaned := piece + originFile + originRank + capture + file + rank + promotes + castles
-		if cleaned == moveCleaned {
-			return m, nil
+		// Parse and clean encoded move
+		notationParts, algebraicNotationError := algebraicNotationParts(moveStr)
+		if algebraicNotationError != nil {
+			continue // Skip invalid moves
 		}
 
-		// Try and remove the disambiguators and see if it parses. Sometimes they
-		// get extraneously added.
-		options := []string{}
-
-		if piece != "" {
-			options = append(options, piece+capture+file+rank+promotes+castles)            // no origin
-			options = append(options, piece+originRank+capture+file+rank+promotes+castles) // no origin file
-			options = append(options, piece+originFile+capture+file+rank+promotes+castles) // no origin rank
-		} else {
-			if capture != "" {
-				// Possibly a pawn capture. In order to parse things like d4xe5, we need
-				// to try parsing without the rank.
-				options = append(options, piece+originFile+capture+file+rank+promotes+castles) // no origin rank
-			}
-			if originFile != "" && originRank != "" {
-				options = append(options, piece+capture+file+rank+promotes+castles) // no origin
-			}
+		// Compare cleaned versions
+		if cleanedInput == notationParts.clean() {
+			return &m, nil
 		}
 
-		for _, opt := range options {
-			if opt == moveCleaned {
-				return m, nil
+		// Try alternative notations
+		for _, opt := range components.generateOptions() {
+			if opt == notationParts.clean() {
+				return &m, nil
 			}
 		}
 	}
-	return nil, fmt.Errorf("chess: could not decode algebraic notation %s for position %s", s, pos.String())
+
+	return nil, fmt.Errorf("chess: move %s is not valid", s)
 }
 
 // LongAlgebraicNotation is a fully expanded version of
 // algebraic notation in which the starting and ending
 // squares are specified.
-// Examples: e2e4, Rd3xd7, O-O (short castling), e7e8=Q (promotion)
+// Examples: e2e4, Rd3xd7, O-O (short castling), e7e8=Q (promotion).
 type LongAlgebraicNotation struct{}
 
 // String implements the fmt.Stringer interface and returns
@@ -228,6 +418,19 @@ func getCheckChar(pos *Position, move *Move) string {
 	return "+"
 }
 
+// getCheckBytes returns the check or mate bytes for a move
+//
+//nolint:unused // I don't care about this
+func getCheckBytes(pos *Position, move *Move) []byte {
+	if !move.HasTag(Check) {
+		return []byte{}
+	}
+	if pos.Update(move).Status() == Checkmate {
+		return []byte(mateStr)
+	}
+	return []byte(checkStr)
+}
+
 func formS1(pos *Position, m *Move) string {
 	p := pos.board.Piece(m.s1)
 	if p.Type() == Pawn {
@@ -235,9 +438,13 @@ func formS1(pos *Position, m *Move) string {
 	}
 
 	var req, fileReq, rankReq bool
-	moves := pos.ValidMoves()
 
-	for _, mv := range moves {
+	// Use a string builder from the pool
+	sb, _ := stringPool.Get().(*strings.Builder)
+	sb.Reset()
+	defer stringPool.Put(sb)
+
+	for _, mv := range pos.ValidMoves() {
 		if mv.s1 != m.s1 && mv.s2 == m.s2 && p == pos.board.Piece(mv.s1) {
 			req = true
 
@@ -251,17 +458,15 @@ func formS1(pos *Position, m *Move) string {
 		}
 	}
 
-	var s1 = ""
-
 	if fileReq || !rankReq && req {
-		s1 = m.s1.File().String()
+		sb.WriteByte(m.s1.File().Byte())
 	}
 
 	if rankReq {
-		s1 += m.s1.Rank().String()
+		sb.WriteByte(m.s1.Rank().Byte())
 	}
 
-	return s1
+	return sb.String()
 }
 
 func charForPromo(p PieceType) string {

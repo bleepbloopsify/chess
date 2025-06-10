@@ -1,6 +1,6 @@
 # opening
 
-**opening** provides interactivity to opening books such as [Encyclopaedia of Chess Openings](https://en.wikipedia.org/wiki/Encyclopaedia_of_Chess_Openings) (ECO) which is loadable from the package.  Source: https://github.com/lichess-org/chess-openings
+**opening** provides interactivity to opening books such as [Encyclopaedia of Chess Openings](https://en.wikipedia.org/wiki/Encyclopaedia_of_Chess_Openings) (ECO) which is loadable from the package. Source: https://github.com/lichess-org/chess-openings
 
 ## Visual
 
@@ -10,7 +10,7 @@ Advance Variation subtree of the French Defense:
 
 ## Example
 
-```go   
+```go
 package main
 
 import (

@@ -1,10 +1,33 @@
+/*
+Package chess provides a complete chess game implementation with support for move
+validation, game tree management, and standard chess formats (PGN, FEN).
+The package manages complete chess games including move history, variations,
+and game outcomes. It supports standard chess rules including all special moves
+(castling, en passant, promotion) and automatic draw detection.
+Example usage:
+
+	// Create new game
+	game := NewGame()
+
+	// Make moves
+	game.PushMove("e4", nil)
+	game.PushMove("e5", nil)
+
+	// Check game status
+
+	if game.Outcome() != NoOutcome {
+		fmt.Printf("Game ended: %s by %s\n", game.Outcome(), game.Method())
+	}
+*/
 package chess
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"slices"
+	"strings"
 )
 
 // A Outcome is the result of a game.
@@ -21,7 +44,7 @@ const (
 	Draw Outcome = "1/2-1/2"
 )
 
-// String implements the fmt.Stringer interface
+// String implements the fmt.Stringer interface.
 func (o Outcome) String() string {
 	return string(o)
 }
@@ -57,23 +80,19 @@ const (
 	InsufficientMaterial
 )
 
-// TagPair represents metadata in a key value pairing used in the PGN format.
-type TagPair struct {
-	Key   string
-	Value string
-}
+// TagPairs represents a collection of PGN tag pairs.
+type TagPairs map[string]string
 
 // A Game represents a single chess game.
 type Game struct {
-	notation             Notation
-	tagPairs             []*TagPair
-	moves                []*Move
-	comments             [][]string
-	positions            []*Position
-	pos                  *Position
-	outcome              Outcome
-	method               Method
-	ignoreAutomaticDraws bool
+	pos                  *Position  // Current position
+	outcome              Outcome    // Game result
+	tagPairs             TagPairs   // PGN tag pairs
+	rootMove             *Move      // Root of move tree
+	currentMove          *Move      // Current position in tree
+	comments             [][]string // Game comments
+	method               Method     // How the game ended
+	ignoreAutomaticDraws bool       // Flag for automatic draw handling
 }
 
 // PGN takes a reader and returns a function that updates
@@ -82,14 +101,29 @@ type Game struct {
 // function is designed to be used in the NewGame constructor.
 // An error is returned if there is a problem parsing the PGN data.
 func PGN(r io.Reader) (func(*Game), error) {
-	b, err := ioutil.ReadAll(r)
+	scanner := NewScanner(r)
+
+	if !scanner.HasNext() {
+		return nil, ErrNoGameFound
+	}
+
+	gameScanned, err := scanner.ScanGame()
 	if err != nil {
 		return nil, err
 	}
-	game, err := decodePGN(string(b))
+
+	tokens, err := TokenizeGame(gameScanned)
 	if err != nil {
 		return nil, err
 	}
+
+	parser := NewParser(tokens)
+	game, err := parser.Parse()
+	if err != nil {
+		return nil, err
+	}
+
+	// Return a function that updates the game with the parsed game state
 	return func(g *Game) {
 		g.copy(game)
 	}, nil
@@ -105,46 +139,40 @@ func FEN(fen string) (func(*Game), error) {
 	if err != nil {
 		return nil, err
 	}
+	if pos == nil {
+		return nil, errors.New("chess: invalid FEN")
+	}
 	return func(g *Game) {
 		pos.inCheck = IsInCheck(pos)
 		g.pos = pos
-		g.positions = []*Position{pos}
-		g.updatePosition()
+		g.rootMove.position = pos
+		g.evaluatePositionStatus()
 	}, nil
 }
 
-// TagPairs returns a function that sets the tag pairs
-// to the given value.  The returned function is designed
-// to be used in the NewGame constructor.
-func TagPairs(tagPairs []*TagPair) func(*Game) {
-	return func(g *Game) {
-		g.tagPairs = append([]*TagPair(nil), tagPairs...)
-	}
-}
-
-// UseNotation returns a function that sets the game's notation
-// to the given value.  The notation is used to parse the
-// string supplied to the MoveStr() method as well as the
-// any PGN output.  The returned function is designed
-// to be used in the NewGame constructor.
-func UseNotation(n Notation) func(*Game) {
-	return func(g *Game) {
-		g.notation = n
-	}
-}
-
-// NewGame defaults to returning a game in the standard
-// opening position.  Options can be given to configure
-// the game's initial state.
+// NewGame returns a new game in the standard starting position.
+// Optional functions can be provided to configure the initial game state.
+//
+// Example:
+//
+//	// Standard game
+//	game := NewGame()
+//
+//	// Game from FEN
+//	game := NewGame(FEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"))
 func NewGame(options ...func(*Game)) *Game {
 	pos := StartingPosition()
+	rootMove := &Move{
+		position: pos,
+	}
+
 	game := &Game{
-		notation:  AlgebraicNotation{},
-		moves:     []*Move{},
-		pos:       pos,
-		positions: []*Position{pos},
-		outcome:   NoOutcome,
-		method:    NoMethod,
+		rootMove:    rootMove,
+		tagPairs:    make(map[string]string),
+		currentMove: rootMove,
+		pos:         pos,
+		outcome:     NoOutcome,
+		method:      NoMethod,
 	}
 	for _, f := range options {
 		if f != nil {
@@ -154,60 +182,139 @@ func NewGame(options ...func(*Game)) *Game {
 	return game
 }
 
-// Move updates the game with the given move.  An error is returned
-// if the move is invalid or the game has already been completed.
-func (g *Game) Move(m *Move) error {
-	valid := moveSlice(g.ValidMoves()).find(m)
-	if valid == nil {
-		return fmt.Errorf("chess: invalid move %s", m)
-	}
-	g.moves = append(g.moves, valid)
-	g.pos = g.pos.Update(valid)
-	g.positions = append(g.positions, g.pos)
-	g.updatePosition()
-	return nil
+// AddVariation adds a new variation to the game.
+// The parent move must be a move in the game or nil to add a variation to the root.
+func (g *Game) AddVariation(parent *Move, newMove *Move) {
+	parent.children = append(parent.children, newMove)
+	newMove.parent = parent
 }
 
-// MoveStr decodes the given string in game's notation
-// and calls the Move function.  An error is returned if
-// the move can't be decoded or the move is invalid.
-func (g *Game) MoveStr(s string) error {
-	m, err := g.notation.Decode(g.pos, s)
-	if err != nil {
-		return err
+// NavigateToMainLine navigates to the main line of the game.
+// The main line is the first child of each move.
+func (g *Game) NavigateToMainLine() {
+	current := g.currentMove
+
+	// First, navigate up to find a move that's part of the main line
+	for current.parent != nil && !isMainLine(current) {
+		current = current.parent
 	}
-	return g.Move(m)
+
+	// If there are no moves in the game, stay at root
+	if len(g.rootMove.children) == 0 {
+		g.currentMove = g.rootMove
+		return
+	}
+
+	// Otherwise, navigate to the first move of the main line
+	g.currentMove = g.rootMove.children[0]
 }
 
-// ValidMoves returns a list of valid moves in the
-// current position.
-func (g *Game) ValidMoves() []*Move {
+func isMainLine(move *Move) bool {
+	if move.parent == nil {
+		return true
+	}
+	return move == move.parent.children[0] && isMainLine(move.parent)
+}
+
+// GoBack navigates to the previous move in the game.
+// Returns true if the move was successful. Returns false if there are no moves to go back to.
+// If the game is at the start, it will return false.
+func (g *Game) GoBack() bool {
+	if g.currentMove != nil && g.currentMove.parent != nil {
+		g.currentMove = g.currentMove.parent
+		g.pos = g.currentMove.position.copy()
+		return true
+	}
+	return false
+}
+
+// GoForward navigates to the next move in the game.
+// Returns true if the move was successful. Returns false if there are no moves to go forward to.
+// If the game is at the end, it will return false.
+func (g *Game) GoForward() bool {
+	// Check if current move exists and has children
+	if g.currentMove != nil && len(g.currentMove.children) > 0 {
+		g.currentMove = g.currentMove.children[0] // Follow main line
+		g.pos = g.currentMove.position
+		return true
+	}
+	return false
+}
+
+// IsAtStart returns true if the game is at the start.
+func (g *Game) IsAtStart() bool {
+	return g.currentMove == nil || g.currentMove == g.rootMove
+}
+
+// IsAtEnd returns true if the game is at the end.
+func (g *Game) IsAtEnd() bool {
+	return g.currentMove != nil && len(g.currentMove.children) == 0
+}
+
+// ValidMoves returns all legal moves in the current position.
+func (g *Game) ValidMoves() []Move {
 	return g.pos.ValidMoves()
 }
 
-// Positions returns the position history of the game.
-func (g *Game) Positions() []*Position {
-	return append([]*Position(nil), g.positions...)
+// Moves returns the move history of the game following the main line.
+func (g *Game) Moves() []*Move {
+	if g.rootMove == nil {
+		return nil
+	}
+
+	moves := make([]*Move, 0)
+	current := g.rootMove
+
+	// Traverse the main line (first child of each move)
+	for current != nil {
+		moves = append(moves, current)
+		if len(current.children) == 0 {
+			break
+		}
+		// Follow main line (first variation)
+		current = current.children[0]
+	}
+
+	return moves[1:] // Skip the root move
 }
 
-// Moves returns the move history of the game.
-func (g *Game) Moves() []*Move {
-	return append([]*Move(nil), g.moves...)
+// GetRootMove returns the root move of the game.
+func (g *Game) GetRootMove() *Move {
+	return g.rootMove
+}
+
+// Variations returns all alternative moves at the given position.
+func (g *Game) Variations(move *Move) []*Move {
+	if move == nil || len(move.children) <= 1 {
+		return nil
+	}
+	// Return all moves except the main line (first child)
+	return move.children[1:]
 }
 
 // Comments returns the comments for the game indexed by moves.
+// Comments returns the comments for the game indexed by moves.
 func (g *Game) Comments() [][]string {
+	if g.comments == nil {
+		return [][]string{}
+	}
 	return append([][]string(nil), g.comments...)
-}
-
-// TagPairs returns the game's tag pairs.
-func (g *Game) TagPairs() []*TagPair {
-	return append([]*TagPair(nil), g.tagPairs...)
 }
 
 // Position returns the game's current position.
 func (g *Game) Position() *Position {
 	return g.pos
+}
+
+// CurrentPosition returns the game's current move position.
+// This is the position at the current pointer in the move tree.
+// This should be used to get the current position of the game instead of Position().
+func (g *Game) CurrentPosition() *Position {
+	if g.currentMove == nil {
+		return g.pos
+	}
+
+	return g.currentMove.position
 }
 
 // Outcome returns the game outcome.
@@ -228,23 +335,215 @@ func (g *Game) FEN() string {
 // String implements the fmt.Stringer interface and returns
 // the game's PGN.
 func (g *Game) String() string {
-	return encodePGN(g)
+	var sb strings.Builder
+
+	var tagPairList = make([]sortableTagPair, len(g.tagPairs))
+
+	var idx uint = 0
+	for tag, value := range g.tagPairs {
+		tagPairList[idx] = sortableTagPair{
+			Key:   tag,
+			Value: value,
+		}
+		idx++
+	}
+
+	slices.SortFunc(tagPairList, cmpTags)
+
+	// Write tag pairs.
+	for _, tagPair := range tagPairList {
+		sb.WriteString(fmt.Sprintf("[%s \"%s\"]\n", tagPair.Key, tagPair.Value))
+	}
+
+	// Append empty line after tag pairs as per definition
+	if len(g.tagPairs) > 0 {
+		sb.WriteString("\n")
+	}
+
+	// Assume g.rootMove is a dummy root (holding the initial position)
+	// and that its first child is the first actual move.
+	if g.rootMove != nil && len(g.rootMove.children) > 0 {
+		writeMoves(g.rootMove, 1, true, &sb, false)
+	}
+
+	// Append the game result.
+	sb.WriteString(g.Outcome().String()) // outcomeString() returns the result as a string (e.g. "1-0")
+	return sb.String()
+}
+
+// sortableTagPair is its own
+type sortableTagPair struct {
+	Key   string
+	Value string
+}
+
+// Compares two tags to determine in which order they should be brought up
+func cmpTags(a, b sortableTagPair) int {
+	// Don't re-order duplicate keys
+	if a.Key == b.Key {
+		return 0
+	}
+
+	// PGN defined tags take priority
+	for _, req := range []string{
+		"Event",
+		"Site",
+		"Date",
+		"Round",
+		"White",
+		"Black",
+		"Result",
+	} {
+		if a.Key == req {
+			return -1
+		}
+		if b.Key == req {
+			return +1
+		}
+	}
+
+	// Finally compare the keys directly and sort by ascending
+	if a.Key < b.Key {
+		return -1
+	} else if b.Key < a.Key {
+		return +1
+	}
+	return 0
+}
+
+// writeMoves recursively writes the PGN-formatted move sequence starting from the given move node into the provided strings.Builder.
+// It handles move numbering for white and black moves, encodes moves using algebraic notation based on the appropriate position,
+// and appends comments and command annotations if present. The function distinguishes between main line moves and sub-variations;
+// when processing a sub-variation, moves are enclosed in parentheses.
+//
+// Parameters:
+//
+//	node - pointer to the current move node from which to write moves.
+//	moveNum - the current move number corresponding to white’s moves.
+//	isWhite - true if it is white’s move, false if it is black’s move.
+//	sb - pointer to a strings.Builder where the formatted move notation is appended.
+//	subVariation - true if the current call is within a sub-variation, affecting formatting details.
+//
+// The function recurses through the move tree, writing the main line first and then processing any additional variations,
+// ensuring that the output adheres to standard PGN conventions. Future enhancements may include support for all NAG values.
+func writeMoves(node *Move, moveNum int, isWhite bool, sb *strings.Builder, subVariation bool) {
+	// If no moves remain, stop.
+	if node == nil {
+		return
+	}
+
+	var currentMove *Move
+
+	// The main line is the first child.
+	if subVariation {
+		currentMove = node
+	} else {
+		if len(node.children) == 0 {
+			return // nothing to print if no child exists (should not happen for a proper game)
+		}
+		currentMove = node.children[0]
+	}
+
+	writeMoveNumber(moveNum, isWhite, subVariation, sb)
+
+	// Encode the move using your AlgebraicNotation.
+	writeMoveEncoding(node, currentMove, sb)
+
+	// Append a comment if present.
+	writeComments(currentMove, sb)
+
+	writeCommands(currentMove, sb)
+
+	//TODO: Add support for all nags values in the future
+
+	// if subvariation is over don't add space
+	if !subVariation {
+		sb.WriteString(" ")
+	} else if len(currentMove.children) > 0 {
+		sb.WriteString(" ")
+	}
+
+	// Process any variations (children beyond the first).
+	// In PGN, variations are enclosed in parentheses.
+	writeVariations(node, moveNum, isWhite, sb)
+
+	if len(currentMove.children) > 0 {
+		var nextMoveNum int
+		var nextIsWhite bool
+		if isWhite {
+			// After white’s move, black plays using the same move number.
+			nextMoveNum = moveNum
+			nextIsWhite = false
+		} else {
+			// After black’s move, increment move number.
+			nextMoveNum = moveNum + 1
+			nextIsWhite = true
+		}
+		writeMoves(currentMove, nextMoveNum, nextIsWhite, sb, false)
+	}
+}
+
+func writeMoveNumber(moveNum int, isWhite bool, subVariation bool, sb *strings.Builder) {
+	if isWhite {
+		sb.WriteString(fmt.Sprintf("%d. ", moveNum))
+	} else if subVariation {
+		sb.WriteString(fmt.Sprintf("%d... ", moveNum))
+	}
+}
+
+func writeMoveEncoding(node *Move, currentMove *Move, sb *strings.Builder) {
+	if node.Parent() == nil {
+		sb.WriteString(AlgebraicNotation{}.Encode(node.Position(), currentMove))
+	} else {
+		moveStr := AlgebraicNotation{}.Encode(node.Parent().Position(), currentMove)
+		sb.WriteString(moveStr)
+	}
+}
+
+func writeComments(move *Move, sb *strings.Builder) {
+	if move.comments != "" {
+		sb.WriteString(" {" + move.comments + "}")
+	}
+}
+
+func writeCommands(move *Move, sb *strings.Builder) {
+	if len(move.command) > 0 {
+		sb.WriteString(" {")
+		for key, value := range move.command {
+			sb.WriteString(" [%" + key + " " + value + "]")
+		}
+		sb.WriteString(" }")
+	}
+}
+
+func writeVariations(node *Move, moveNum int, isWhite bool, sb *strings.Builder) {
+	if len(node.children) > 1 {
+		for i := 1; i < len(node.children); i++ {
+			variation := node.children[i]
+			sb.WriteString("(")
+			writeMoves(variation, moveNum, isWhite, sb, true)
+			sb.WriteString(") ")
+		}
+	}
 }
 
 // MarshalText implements the encoding.TextMarshaler interface and
 // encodes the game's PGN.
-func (g *Game) MarshalText() (text []byte, err error) {
-	return []byte(encodePGN(g)), nil
+func (g *Game) MarshalText() ([]byte, error) {
+	return []byte(g.String()), nil
 }
 
-// UnmarshalText implements the encoding.TextUnarshaler interface and
+// UnmarshalText implements the encoding.TextUnmarshaler interface and
 // assumes the data is in the PGN format.
 func (g *Game) UnmarshalText(text []byte) error {
-	game, err := decodePGN(string(text))
+	r := bytes.NewReader(text)
+
+	toGame, err := PGN(r)
 	if err != nil {
 		return err
 	}
-	g.copy(game)
+	toGame(g)
+
 	return nil
 }
 
@@ -252,18 +551,21 @@ func (g *Game) UnmarshalText(text []byte) error {
 // method is valid, then the game is updated to a draw by that
 // method.  If the method isn't valid then an error is returned.
 func (g *Game) Draw(method Method) error {
+	const halfMoveClockForFiftyMoveRule = 100
+	const numOfRepetitionsForThreefoldRepetition = 3
+
 	switch method {
 	case ThreefoldRepetition:
-		if g.numOfRepetitions() < 3 {
+		if g.numOfRepetitions() < numOfRepetitionsForThreefoldRepetition {
 			return errors.New("chess: draw by ThreefoldRepetition requires at least three repetitions of the current board state")
 		}
 	case FiftyMoveRule:
-		if g.pos.halfMoveClock < 100 {
-			return fmt.Errorf("chess: draw by FiftyMoveRule requires the half move clock to be at 100 or greater but is %d", g.pos.halfMoveClock)
+		if g.pos.halfMoveClock < halfMoveClockForFiftyMoveRule {
+			return errors.New("chess: draw by FiftyMoveRule requires a half move clock of 100 or greater")
 		}
 	case DrawOffer:
 	default:
-		return fmt.Errorf("chess: unsupported draw method %s", method.String())
+		return errors.New("chess: invalid draw method")
 	}
 	g.outcome = Draw
 	g.method = method
@@ -286,11 +588,14 @@ func (g *Game) Resign(color Color) {
 
 // EligibleDraws returns valid inputs for the Draw() method.
 func (g *Game) EligibleDraws() []Method {
+	const halfMoveClockForFiftyMoveRule = 100
+	const numOfRepetitionsForThreefoldRepetition = 3
+
 	draws := []Method{DrawOffer}
-	if g.numOfRepetitions() >= 3 {
+	if g.numOfRepetitions() >= numOfRepetitionsForThreefoldRepetition {
 		draws = append(draws, ThreefoldRepetition)
 	}
-	if g.pos.halfMoveClock >= 100 {
+	if g.pos.halfMoveClock >= halfMoveClockForFiftyMoveRule {
 		draws = append(draws, FiftyMoveRule)
 	}
 	return draws
@@ -299,75 +604,36 @@ func (g *Game) EligibleDraws() []Method {
 // AddTagPair adds or updates a tag pair with the given key and
 // value and returns true if the value is overwritten.
 func (g *Game) AddTagPair(k, v string) bool {
-	for i, tag := range g.tagPairs {
-		if tag.Key == k {
-			g.tagPairs[i].Value = v
-			return true
-		}
+	if g.tagPairs == nil {
+		g.tagPairs = make(map[string]string)
 	}
-	g.tagPairs = append(g.tagPairs, &TagPair{Key: k, Value: v})
+	if _, existing := g.tagPairs[k]; existing {
+		g.tagPairs[k] = v
+		return true
+	}
+	g.tagPairs[k] = v
 	return false
 }
 
 // GetTagPair returns the tag pair for the given key or nil
 // if it is not present.
-func (g *Game) GetTagPair(k string) *TagPair {
-	for _, tag := range g.tagPairs {
-		if tag.Key == k {
-			return tag
-		}
-	}
-	return nil
+func (g *Game) GetTagPair(k string) string {
+	return g.tagPairs[k]
 }
 
 // RemoveTagPair removes the tag pair for the given key and
 // returns true if a tag pair was removed.
 func (g *Game) RemoveTagPair(k string) bool {
-	cp := []*TagPair{}
-	found := false
-	for _, tag := range g.tagPairs {
-		if tag.Key == k {
-			found = true
-		} else {
-			cp = append(cp, tag)
-		}
+	if _, existing := g.tagPairs[k]; existing {
+		delete(g.tagPairs, k)
+		return true
 	}
-	g.tagPairs = cp
-	return found
+
+	return false
 }
 
-// MoveHistory is a move's result from Game's MoveHistory method.
-// It contains the move itself, any comments, and the pre and post
-// positions.
-type MoveHistory struct {
-	PrePosition  *Position
-	PostPosition *Position
-	Move         *Move
-	Comments     []string
-}
-
-// MoveHistory returns the moves in order along with the pre and post
-// positions and any comments.
-func (g *Game) MoveHistory() []*MoveHistory {
-	h := []*MoveHistory{}
-	for i, p := range g.positions {
-		if i == 0 {
-			continue
-		}
-		m := g.moves[i-1]
-		c := g.comments[i-1]
-		mh := &MoveHistory{
-			PrePosition:  g.positions[i-1],
-			PostPosition: p,
-			Move:         m,
-			Comments:     c,
-		}
-		h = append(h, mh)
-	}
-	return h
-}
-
-func (g *Game) updatePosition() {
+// evaluatePositionStatus updates the game's outcome and method based on the current position.
+func (g *Game) evaluatePositionStatus() {
 	method := g.pos.Status()
 	if method == Stalemate {
 		g.method = Stalemate
@@ -402,34 +668,219 @@ func (g *Game) updatePosition() {
 	}
 }
 
+// copy copies the game state from the given game.
 func (g *Game) copy(game *Game) {
-	g.tagPairs = game.TagPairs()
-	g.moves = game.Moves()
-	g.positions = game.Positions()
+	g.tagPairs = make(map[string]string)
+	for k, v := range game.tagPairs {
+		g.tagPairs[k] = v
+	}
+	g.rootMove = game.rootMove
+	g.currentMove = game.currentMove
 	g.pos = game.pos
 	g.outcome = game.outcome
 	g.method = game.method
 	g.comments = game.Comments()
+	g.ignoreAutomaticDraws = game.ignoreAutomaticDraws
 }
 
+// Clone returns a deep copy of the game.
 func (g *Game) Clone() *Game {
 	return &Game{
-		tagPairs:  g.TagPairs(),
-		notation:  g.notation,
-		moves:     g.Moves(),
-		positions: g.Positions(),
-		pos:       g.pos,
-		outcome:   g.outcome,
-		method:    g.method,
+		tagPairs:             g.tagPairs,
+		rootMove:             g.rootMove,
+		currentMove:          g.currentMove,
+		pos:                  g.pos,
+		outcome:              g.outcome,
+		method:               g.method,
+		comments:             g.Comments(),
+		ignoreAutomaticDraws: g.ignoreAutomaticDraws,
 	}
+}
+
+// Positions returns all positions in the game.
+// This includes the starting position and all positions after each move.
+func (g *Game) Positions() []*Position {
+	positions := make([]*Position, 0)
+	current := g.rootMove
+
+	for current != nil {
+		if current.position != nil {
+			positions = append(positions, current.position)
+		}
+		if len(current.children) == 0 {
+			break
+		}
+		current = current.children[0]
+	}
+
+	return positions
 }
 
 func (g *Game) numOfRepetitions() int {
 	count := 0
 	for _, pos := range g.Positions() {
+		if pos == nil {
+			continue
+		}
 		if g.pos.samePosition(pos) {
 			count++
 		}
 	}
 	return count
+}
+
+// PushMoveOptions contains options for pushing a move to the game
+type PushMoveOptions struct {
+	// ForceMainline makes this move the main line if variations exist
+	ForceMainline bool
+}
+
+// Deprecated: use PushNotationMove instead.
+//
+// PushMove adds a move in algebraic notation to the game.
+// Returns an error if the move is invalid.
+//
+// Example:
+//
+//	err := game.PushMove("e4", &PushMoveOptions{ForceMainline: true})
+func (g *Game) PushMove(algebraicMove string, options *PushMoveOptions) error {
+	if options == nil {
+		options = &PushMoveOptions{}
+	}
+
+	move, err := g.parseAndValidateMove(algebraicMove)
+	if err != nil {
+		return err
+	}
+
+	existingMove := g.findExistingMove(move)
+	g.addOrReorderMove(move, existingMove, options.ForceMainline)
+
+	g.updatePosition(move)
+	g.currentMove = move
+
+	// Add this line to evaluate the position after the move
+	g.evaluatePositionStatus()
+
+	return nil
+}
+
+// PushNotationMove adds a move to the game using any supported notation.
+// It returns an error if the move is invalid.
+//
+// Example:
+//
+//	err := game.PushNotationMove("e4", chess.AlgebraicNotation{}, &PushMoveOptions{ForceMainline: true})
+//	if err != nil {
+//	  panic(err)
+//	}
+//
+//	game.PushNotationMove("c7c5", chess.UCINotation{}, nil)
+//	game.PushNotationMove("Nc1f3", chess.LongAlgebraicNotation{}, nil)
+func (g *Game) PushNotationMove(moveStr string, notation Notation, options *PushMoveOptions) error {
+	move, err := notation.Decode(g.pos, moveStr)
+	if err != nil {
+		return err
+	}
+
+	return g.Move(move, options)
+}
+
+// Move method adds a move to the game using a Move struct.
+// It returns an error if the move is invalid.
+//
+// Example:
+//
+//	possibleMove := game.ValidMoves()[0]
+//
+//	err := game.Move(&possibleMove, nil)
+//	if err != nil {
+//	    panic(err)
+//	}
+func (g *Game) Move(move *Move, options *PushMoveOptions) error {
+	if options == nil {
+		options = &PushMoveOptions{}
+	}
+
+	existingMove := g.findExistingMove(move)
+	g.addOrReorderMove(move, existingMove, options.ForceMainline)
+
+	g.updatePosition(move)
+	g.currentMove = move
+
+	g.evaluatePositionStatus()
+
+	return nil
+}
+
+func (g *Game) parseAndValidateMove(algebraicMove string) (*Move, error) {
+	tokens, err := TokenizeGame(&GameScanned{Raw: algebraicMove})
+	if err != nil {
+		return nil, errors.New("failed to tokenize move")
+	}
+
+	parser := NewParser(tokens)
+	parser.game = g
+	parser.currentMove = g.currentMove
+
+	move, err := parser.parseMove()
+	if err != nil {
+		return nil, err
+	}
+
+	if g.pos == nil {
+		return nil, errors.New("no current position")
+	}
+
+	return move, nil
+}
+
+func (g *Game) findExistingMove(move *Move) *Move {
+	if g.currentMove == nil {
+		return nil
+	}
+	for _, child := range g.currentMove.children {
+		if child.s1 == move.s1 && child.s2 == move.s2 && child.promo == move.promo {
+			return child
+		}
+	}
+	return nil
+}
+
+func (g *Game) addOrReorderMove(move, existingMove *Move, forceMainline bool) {
+	move.parent = g.currentMove
+
+	if existingMove != nil {
+		if forceMainline && existingMove != g.currentMove.children[0] {
+			g.reorderMoveToFront(existingMove)
+		}
+	} else {
+		g.addNewMove(move, forceMainline)
+	}
+}
+
+func (g *Game) reorderMoveToFront(move *Move) {
+	children := g.currentMove.children
+	for i, child := range children {
+		if child == move {
+			copy(children[1:i+1], children[:i])
+			children[0] = move
+			break
+		}
+	}
+}
+
+func (g *Game) addNewMove(move *Move, forceMainline bool) {
+	if forceMainline {
+		g.currentMove.children = append([]*Move{move}, g.currentMove.children...)
+	} else {
+		g.currentMove.children = append(g.currentMove.children, move)
+	}
+}
+
+func (g *Game) updatePosition(move *Move) {
+	if newPos := g.pos.Update(move); newPos != nil {
+		g.pos = newPos
+		move.position = newPos
+	}
 }

@@ -1,5 +1,7 @@
 package chess
 
+import "strings"
+
 // A MoveTag represents a notable consequence of a move.
 type MoveTag uint16
 
@@ -21,10 +23,17 @@ const (
 
 // A Move is the movement of a piece from one square to another.
 type Move struct {
-	s1    Square
-	s2    Square
-	promo PieceType
-	tags  MoveTag
+	parent   *Move
+	position *Position // Position after the move
+	nag      string
+	comments string
+	command  map[string]string // Store commands as key-value pairs
+	children []*Move           // Main line and variations
+	number   uint
+	tags     MoveTag
+	s1       Square
+	s2       Square
+	promo    PieceType
 }
 
 // String returns a string useful for debugging.  String doesn't return
@@ -53,20 +62,63 @@ func (m *Move) HasTag(tag MoveTag) bool {
 	return (tag & m.tags) > 0
 }
 
-func (m *Move) addTag(tag MoveTag) {
-	m.tags = m.tags | tag
+// AddTag adds the given MoveTag to the move's tags using a bitwise OR operation.
+// Multiple tags can be combined by calling AddTag multiple times.
+func (m *Move) AddTag(tag MoveTag) {
+	m.tags |= tag
 }
 
-type moveSlice []*Move
+func (m *Move) GetCommand(key string) (string, bool) {
+	if m.command == nil {
+		m.command = make(map[string]string)
+		return "", false
+	}
+	value, ok := m.command[key]
+	return value, ok
+}
 
-func (a moveSlice) find(m *Move) *Move {
-	if m == nil {
-		return nil
+func (m *Move) SetCommand(key, value string) {
+	if m.command == nil {
+		m.command = make(map[string]string)
 	}
-	for _, move := range a {
-		if move.String() == m.String() {
-			return move
-		}
-	}
-	return nil
+	m.command[key] = value
+}
+
+func (m *Move) SetComment(comment string) {
+	m.comments = comment
+}
+
+func (m *Move) AddComment(comment string) {
+	comments := strings.Builder{}
+	comments.WriteString(m.comments)
+	comments.WriteString(comment)
+	m.comments = comments.String()
+}
+
+func (m *Move) Comments() string {
+	return m.comments
+}
+
+func (m *Move) NAG() string {
+	return m.nag
+}
+
+func (m *Move) SetNAG(nag string) {
+	m.nag = nag
+}
+
+func (m *Move) Parent() *Move {
+	return m.parent
+}
+
+func (m *Move) Position() *Position {
+	return m.position
+}
+
+func (m *Move) Children() []*Move {
+	return m.children
+}
+
+func (m *Move) Number() int {
+	return int(m.number)
 }

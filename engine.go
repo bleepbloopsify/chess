@@ -1,16 +1,58 @@
+/*
+Package chess implements a chess game engine that manages move generation,
+position analysis, and game state validation.
+The engine uses bitboard operations and lookup tables for efficient move
+generation and position analysis. Move generation includes standard piece
+moves, captures, castling, en passant, and pawn promotions.
+Example usage:
+
+	// Create a position
+	pos := NewPosition()
+
+	// Calculate legal moves for current position
+	eng := engine{}
+	moves := eng.CalcMoves(pos, false)
+
+	// Check game status
+	status := eng.Status(pos)
+	if status == Checkmate {
+		fmt.Println("Game Over - Checkmate")
+	}
+*/
 package chess
 
+import "sync"
+
+// engine implements chess move generation and position analysis.
 type engine struct{}
 
-func (engine) CalcMoves(pos *Position, first bool) []*Move {
+// CalcMoves returns all legal moves for the given position. If first is true,
+// returns after finding the first legal move. This is useful for quick position
+// validation.
+//
+// The moves are generated in the following order:
+//  1. Standard piece moves and captures
+//  2. Castling moves (if available)
+//
+// Each move is validated to ensure it doesn't leave the king in check
+func (engine) CalcMoves(pos *Position, first bool) []Move {
 	// generate possible moves
 	moves := standardMoves(pos, first)
 	// return moves including castles
 	return append(moves, castleMoves(pos)...)
 }
 
+// Status returns the current game status (Checkmate, Stalemate, or NoMethod)
+// based on the position.
+//
+// The status is determined by:
+//   - Whether the side to move is in check
+//   - Whether any legal moves exist
+//
+// If the position has cached valid moves in pos.validMoves, those will be
+// used. Otherwise, moves will be calculated to determine the status.
 func (engine) Status(pos *Position) Method {
-	hasMove := false
+	var hasMove bool
 	if pos.validMoves != nil {
 		hasMove = len(pos.validMoves) > 0
 	} else {
@@ -24,87 +66,143 @@ func (engine) Status(pos *Position) Method {
 	return NoMethod
 }
 
-var (
-	promoPieceTypes = []PieceType{Queen, Rook, Bishop, Knight}
-)
+// TODO: don't use globals
+//
+//nolint:gochecknoglobals // this is a lookup table
+var promoPieceTypes = []PieceType{Queen, Rook, Bishop, Knight}
 
-func standardMoves(pos *Position, first bool) []*Move {
-	// compute allowed destination bitboard
+const maxPossibleMoves = 218 // Maximum possible moves in any chess position
+
+// movePool is a pool of Move arrays to reduce allocations
+// in the standardMoves function.
+//
+//nolint:gochecknoglobals // this is a sync pool
+var movePool = sync.Pool{
+	New: func() interface{} {
+		return &[maxPossibleMoves]Move{}
+	},
+}
+
+// standardMoves generates all standard (non-castling) legal moves for the
+// current position. If first is true, returns after finding the first
+// legal move.
+//
+// The function uses a sync.Pool of move arrays to reduce allocations. Each
+// move is validated to ensure it doesn't leave the king in check.
+func standardMoves(pos *Position, first bool) []Move {
+	moves, _ := movePool.Get().(*[maxPossibleMoves]Move)
+	defer movePool.Put(moves)
+	count := 0
+
+	// Reuse a single Move struct for temporary operations
+	var m Move
+
 	bbAllowed := ^pos.board.whiteSqs
 	if pos.Turn() == Black {
 		bbAllowed = ^pos.board.blackSqs
 	}
-	moves := []*Move{}
-	// iterate through pieces to find possible moves
+
 	for _, p := range allPieces {
 		if pos.Turn() != p.Color() {
 			continue
 		}
-		// iterate through possible starting squares for piece
 		s1BB := pos.board.bbForPiece(p)
 		if s1BB == 0 {
 			continue
 		}
-		for s1 := 0; s1 < numOfSquaresInBoard; s1++ {
+		for s1 := range numOfSquaresInBoard {
 			if s1BB&bbForSquare(Square(s1)) == 0 {
 				continue
 			}
-			// iterate through possible destination squares for piece
 			s2BB := bbForPossibleMoves(pos, p.Type(), Square(s1)) & bbAllowed
 			if s2BB == 0 {
 				continue
 			}
-			for s2 := 0; s2 < numOfSquaresInBoard; s2++ {
+			for s2 := range numOfSquaresInBoard {
 				if s2BB&bbForSquare(Square(s2)) == 0 {
 					continue
 				}
-				// add promotions if pawn on promo square
+
+				// Reuse move struct by setting fields directly
+				m.s1 = Square(s1)
+				m.s2 = Square(s2)
+				m.tags = 0 // Reset tags
+
 				if (p == WhitePawn && Square(s2).Rank() == Rank8) || (p == BlackPawn && Square(s2).Rank() == Rank1) {
 					for _, pt := range promoPieceTypes {
-						m := &Move{s1: Square(s1), s2: Square(s2), promo: pt}
-						addTags(m, pos)
-						// filter out moves that put king into check
+						m.promo = pt
+						addTags(&m, pos)
 						if !m.HasTag(inCheck) {
-							moves = append(moves, m)
+							// Copy the valid move to the array
+							moves[count] = m
+							count++
 							if first {
-								return moves
+								// For single move, return fixed array of size 1
+								var result [1]Move
+								result[0] = moves[0]
+								return result[:]
 							}
 						}
 					}
 				} else {
-					m := &Move{s1: Square(s1), s2: Square(s2)}
-					addTags(m, pos)
-					// filter out moves that put king into check
+					m.promo = 0
+					addTags(&m, pos)
 					if !m.HasTag(inCheck) {
-						moves = append(moves, m)
+						moves[count] = m
+						count++
 						if first {
-							return moves
+							var result [1]Move
+							result[0] = moves[0]
+							return result[:]
 						}
 					}
 				}
 			}
 		}
 	}
-	return moves
+
+	// Need to copy since we're returning array to pool
+	result := make([]Move, count)
+	copy(result, moves[:count])
+	return result
 }
 
+// addTags updates a move's tags based on the resulting position.
+// Tags include:
+//   - Capture: The move captures an opponent's piece
+//   - EnPassant: The move is an en passant capture
+//   - Check: The move puts the opponent in check
+//   - inCheck: The move leaves the moving side's king in check (illegal)
+//   - KingSideCastle: The move is a king-side castle
+//   - QueenSideCastle: The move is a queen-side castle
 func addTags(m *Move, pos *Position) {
 	p := pos.board.Piece(m.s1)
 	if pos.board.isOccupied(m.s2) {
-		m.addTag(Capture)
+		m.AddTag(Capture)
 	} else if m.s2 == pos.enPassantSquare && p.Type() == Pawn {
-		m.addTag(EnPassant)
+		m.AddTag(EnPassant)
+	}
+	// determine if move is castle
+	if (p == WhiteKing && m.s1 == E1) || (p == BlackKing && m.s1 == E8) {
+		switch m.s2 {
+		case C1, C8:
+			m.AddTag(QueenSideCastle)
+			break
+		case G1, G8:
+			m.AddTag(KingSideCastle)
+			break
+		}
 	}
 	// determine if in check after move (makes move invalid)
 	cp := pos.copy()
 	cp.board.update(m)
 	if IsInCheck(cp) {
-		m.addTag(inCheck)
+		m.AddTag(inCheck)
 	}
 	// determine if opponent in check after move
 	cp.turn = cp.turn.Other()
 	if IsInCheck(cp) {
-		m.addTag(Check)
+		m.AddTag(Check)
 	}
 }
 
@@ -120,6 +218,16 @@ func IsInCheck(pos *Position) bool {
 	return squaresAreAttacked(pos, kingSq)
 }
 
+// squaresAreAttacked returns true if any of the given squares are attacked
+// by the opponent in the given position.
+//
+// The function checks attacks from:
+//   - Sliding pieces (queen, rook, bishop)
+//   - Knights
+//   - Pawns
+//   - King
+//
+//nolint:mnd // this is a formula to determine if a square is attacked
 func squaresAreAttacked(pos *Position, sqs ...Square) bool {
 	otherColor := pos.Turn().Other()
 	occ := ^pos.board.emptySqs
@@ -182,6 +290,17 @@ func squaresAreAttacked(pos *Position, sqs ...Square) bool {
 	return false
 }
 
+// bbForPossibleMoves returns a bitboard with 1s in positions where the piece
+// of the given type at the given square can potentially move, without considering
+// whether the moves would be legal (e.g., leave the king in check).
+//
+// The function handles movement patterns for:
+//   - King: One square in any direction
+//   - Queen: Sliding moves in all directions
+//   - Rook: Sliding moves horizontally and vertically
+//   - Bishop: Sliding moves diagonally
+//   - Knight: L-shaped jumps
+//   - Pawn: Forward moves and captures, including en passant
 func bbForPossibleMoves(pos *Position, pt PieceType, sq Square) bitboard {
 	switch pt {
 	case King:
@@ -200,54 +319,80 @@ func bbForPossibleMoves(pos *Position, pt PieceType, sq Square) bitboard {
 	return bitboard(0)
 }
 
-// TODO can calc isInCheck twice
-func castleMoves(pos *Position) []*Move {
-	moves := []*Move{}
+// castleMoves returns all legal castling moves for the current position.
+//
+// A castling move is legal if:
+//   - The king has castling rights in that direction
+//   - The squares between king and rook are empty
+//   - The king is not in check
+//   - The king does not pass through check
+func castleMoves(pos *Position) []Move {
+	var moves [2]Move // Maximum of 2 possible castle moves (king side and queen side)
+	count := 0
+
 	kingSide := pos.castleRights.CanCastle(pos.Turn(), KingSide)
 	queenSide := pos.castleRights.CanCastle(pos.Turn(), QueenSide)
+
 	// white king side
 	if pos.turn == White && kingSide &&
 		(^pos.board.emptySqs&(bbForSquare(F1)|bbForSquare(G1))) == 0 &&
 		!squaresAreAttacked(pos, F1, G1) &&
 		!pos.inCheck {
-		m := &Move{s1: E1, s2: G1}
-		m.addTag(KingSideCastle)
-		addTags(m, pos)
-		moves = append(moves, m)
+		m := Move{s1: E1, s2: G1}
+		m.AddTag(KingSideCastle)
+		addTags(&m, pos)
+		moves[count] = m
+		count++
 	}
+
 	// white queen side
 	if pos.turn == White && queenSide &&
 		(^pos.board.emptySqs&(bbForSquare(B1)|bbForSquare(C1)|bbForSquare(D1))) == 0 &&
 		!squaresAreAttacked(pos, C1, D1) &&
 		!pos.inCheck {
-		m := &Move{s1: E1, s2: C1}
-		m.addTag(QueenSideCastle)
-		addTags(m, pos)
-		moves = append(moves, m)
+		m := Move{s1: E1, s2: C1}
+		m.AddTag(QueenSideCastle)
+		addTags(&m, pos)
+		moves[count] = m
+		count++
 	}
+
 	// black king side
 	if pos.turn == Black && kingSide &&
 		(^pos.board.emptySqs&(bbForSquare(F8)|bbForSquare(G8))) == 0 &&
 		!squaresAreAttacked(pos, F8, G8) &&
 		!pos.inCheck {
-		m := &Move{s1: E8, s2: G8}
-		m.addTag(KingSideCastle)
-		addTags(m, pos)
-		moves = append(moves, m)
+		m := Move{s1: E8, s2: G8}
+		m.AddTag(KingSideCastle)
+		addTags(&m, pos)
+		moves[count] = m
+		count++
 	}
+
 	// black queen side
 	if pos.turn == Black && queenSide &&
 		(^pos.board.emptySqs&(bbForSquare(B8)|bbForSquare(C8)|bbForSquare(D8))) == 0 &&
 		!squaresAreAttacked(pos, C8, D8) &&
 		!pos.inCheck {
-		m := &Move{s1: E8, s2: C8}
-		m.addTag(QueenSideCastle)
-		addTags(m, pos)
-		moves = append(moves, m)
+		m := Move{s1: E8, s2: C8}
+		m.AddTag(QueenSideCastle)
+		addTags(&m, pos)
+		moves[count] = m
+		count++
 	}
-	return moves
+
+	return moves[:count]
 }
 
+// pawnMoves returns a bitboard with 1s in positions where the pawn at the
+// given square can potentially move.
+//
+// The function considers:
+//   - Single and double forward moves
+//   - Diagonal captures
+//   - En passant captures
+//
+//nolint:mnd // this is a formula to determine the color of a square
 func pawnMoves(pos *Position, sq Square) bitboard {
 	bb := bbForSquare(sq)
 	var bbEnPassant bitboard
@@ -268,6 +413,8 @@ func pawnMoves(pos *Position, sq Square) bitboard {
 	return capRight | capLeft | upOne | upTwo
 }
 
+// diaAttack returns a bitboard representing possible diagonal moves for a
+// sliding piece, considering occupied squares as blocking further movement.
 func diaAttack(occupied bitboard, sq Square) bitboard {
 	pos := bbForSquare(sq)
 	dMask := bbDiagonals[sq]
@@ -275,13 +422,17 @@ func diaAttack(occupied bitboard, sq Square) bitboard {
 	return linearAttack(occupied, pos, dMask) | linearAttack(occupied, pos, adMask)
 }
 
+// hvAttack returns a bitboard representing possible horizontal and vertical
 func hvAttack(occupied bitboard, sq Square) bitboard {
 	pos := bbForSquare(sq)
-	rankMask := bbRanks[Square(sq).Rank()]
-	fileMask := bbFiles[Square(sq).File()]
+	rankMask := bbRanks[sq.Rank()]
+	fileMask := bbFiles[sq.File()]
 	return linearAttack(occupied, pos, rankMask) | linearAttack(occupied, pos, fileMask)
 }
 
+// linearAttack returns a bitboard representing possible moves in a single
+// direction (rank, file, or diagonal) for a sliding piece, considering
+// occupied squares as blocking further movement.
 func linearAttack(occupied, pos, mask bitboard) bitboard {
 	oInMask := occupied & mask
 	return ((oInMask - 2*pos) ^ (oInMask.Reverse() - 2*pos.Reverse()).Reverse()) & mask
@@ -312,9 +463,12 @@ func bbForSquare(sq Square) bitboard {
 	return bbSquares[sq]
 }
 
+// Lookup tables for piece movement patterns and board masks.
+//
+//nolint:gochecknoglobals // this is a lookup table
 var (
-	bbFiles = [8]bitboard{bbFileA, bbFileB, bbFileC, bbFileD, bbFileE, bbFileF, bbFileG, bbFileH}
-	bbRanks = [8]bitboard{bbRank1, bbRank2, bbRank3, bbRank4, bbRank5, bbRank6, bbRank7, bbRank8}
+	bbFiles = [8]bitboard{bbFileA, bbFileB, bbFileC, bbFileD, bbFileE, bbFileF, bbFileG, bbFileH} // bbFiles contains masks for each file (A-H)
+	bbRanks = [8]bitboard{bbRank1, bbRank2, bbRank3, bbRank4, bbRank5, bbRank6, bbRank7, bbRank8} // bbRanks contains masks for each rank (1-8)
 
 	bbDiagonals = [64]bitboard{9241421688590303745, 4620710844295151872, 2310355422147575808, 1155177711073755136, 577588855528488960, 288794425616760832, 144396663052566528, 72057594037927936, 36099303471055874, 9241421688590303745, 4620710844295151872, 2310355422147575808, 1155177711073755136, 577588855528488960, 288794425616760832, 144396663052566528, 141012904183812, 36099303471055874, 9241421688590303745, 4620710844295151872, 2310355422147575808, 1155177711073755136, 577588855528488960, 288794425616760832, 550831656968, 141012904183812, 36099303471055874, 9241421688590303745, 4620710844295151872, 2310355422147575808, 1155177711073755136, 577588855528488960, 2151686160, 550831656968, 141012904183812, 36099303471055874, 9241421688590303745, 4620710844295151872, 2310355422147575808, 1155177711073755136, 8405024, 2151686160, 550831656968, 141012904183812, 36099303471055874, 9241421688590303745, 4620710844295151872, 2310355422147575808, 32832, 8405024, 2151686160, 550831656968, 141012904183812, 36099303471055874, 9241421688590303745, 4620710844295151872, 128, 32832, 8405024, 2151686160, 550831656968, 141012904183812, 36099303471055874, 9241421688590303745}
 
@@ -333,8 +487,12 @@ var (
 	bbSquares = [64]bitboard{}
 )
 
+// TODO: remove this init function
+//
+//nolint:gochecknoinits // will be removed
 func init() {
-	for sq := 0; sq < 64; sq++ {
+	const numOfSquaresInBoard = 64
+	for sq := range numOfSquaresInBoard {
 		bbSquares[sq] = bitboard(uint64(1) << (uint8(63) - uint8(sq)))
 	}
 }
