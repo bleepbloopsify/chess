@@ -2,6 +2,8 @@ package chess
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type notationDecodeTest struct {
@@ -398,5 +400,52 @@ func BenchmarkPromotionEncoding(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		notation := notations[i%len(notations)]
 		notation.Encode(promoPos, promoMove)
+	}
+}
+
+func TestMoves(t *testing.T) {
+	cases := []struct {
+		fen   string
+		moves []string
+	}{
+		{
+			fen: "8/8/4p3/1p6/p1p5/2P5/3kp3/K7 b - - 1 13",
+			moves: []string{
+				"e2e1q",
+			},
+		},
+		{
+			fen: "5k2/3ppp2/8/8/8/p3PK2/3p4/8 b - - 1 9",
+			moves: []string{
+				"d2d1q",
+			},
+		},
+	}
+
+	for _, tCase := range cases {
+		fen, moves := tCase.fen, tCase.moves
+		fenOpt, err := FEN(fen)
+		assert.Nil(t, err)
+		game := NewGame(
+			fenOpt,
+		)
+		for _, m := range moves {
+			err = game.PushNotationMove(m, UCINotation{}, nil)
+			assert.Nil(t, err)
+		}
+
+		fenAfter := game.FEN()
+		t.Log(fenAfter)
+
+		gameMoves := game.Moves()
+
+		uciNot := UCINotation{}
+		algNot := AlgebraicNotation{}
+		for _, m := range gameMoves {
+			uciMove := uciNot.Encode(m.Parent().Position(), m)
+			algMove := algNot.Encode(m.Parent().Position(), m)
+
+			t.Log(uciMove, algMove)
+		}
 	}
 }

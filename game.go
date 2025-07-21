@@ -93,6 +93,7 @@ type Game struct {
 	comments             [][]string // Game comments
 	method               Method     // How the game ended
 	ignoreAutomaticDraws bool       // Flag for automatic draw handling
+	automaticDrawAt      int        // Config for 3 or 5 fold repetition draws
 }
 
 // PGN takes a reader and returns a function that updates
@@ -148,6 +149,13 @@ func FEN(fen string) (func(*Game), error) {
 		g.rootMove.position = pos
 		g.evaluatePositionStatus()
 	}, nil
+}
+
+// Configures the repetition automatic drawing
+func WithAutoDrawAt(n int) func(*Game) {
+	return func(g *Game) {
+		g.automaticDrawAt = n
+	}
 }
 
 // NewGame returns a new game in the standard starting position.
@@ -649,8 +657,8 @@ func (g *Game) evaluatePositionStatus() {
 		return
 	}
 
-	// five fold rep creates automatic draw
-	if !g.ignoreAutomaticDraws && g.numOfRepetitions() >= 5 {
+	// n-fold rep creates automatic draw
+	if !g.ignoreAutomaticDraws && g.numOfRepetitions() >= g.automaticDrawAt {
 		g.outcome = Draw
 		g.method = FivefoldRepetition
 	}

@@ -250,7 +250,7 @@ func (p Piece) String() string {
 // TODO: This is a constant slice
 //
 //nolint:gochecknoglobals // This is a constant slice.
-var pieceUnicodes = []string{" ", "♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"}
+var pieceUnicodes = []string{"😡", "♔", "♕", "♖", "♗", "♘", "♙", "♚", "♛", "♜", "♝", "♞", "♟"}
 
 // getFENChar returns the FEN character representation of a piece
 // Returns a single byte representing the piece.
